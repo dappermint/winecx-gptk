@@ -1,0 +1,104 @@
+name: build winecx gptk runtime
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ensure rosetta
+        run: |
+          /usr/sbin/softwareupdate --install-rosetta --agree-to-license || true
+          arch -x86_64 /usr/bin/true && echo "rosetta ok"
+
+      - name: clone winecx
+        run: git clone --depth 1 https://github.com/PhoenicisOrg/winecx.git winecx
+
+      - name: build tools (arm64, output is arch independent)
+        run: |
+          brew install bison flex pkg-config
+          curl -sL -o llvm-mingw.tar.xz \
+            https://github.com/mstorsjo/llvm-mingw/releases/download/20260616/llvm-mingw-20260616-ucrt-macos-universal.tar.xz
+          tar -xf llvm-mingw.tar.xz
+          mv llvm-mingw-* llvm-mingw
+
+      - name: x86_64 homebrew for unix-side libs
+        run: |
+          arch -x86_64 /bin/bash -c "NONINTERACTIVE=1 $(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          arch -x86_64 /usr/local/bin/brew install --quiet freetype gnutls
+
+      - name: configure
+        run: |
+          export PATH="/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:$PWD/llvm-mingw/bin:$PATH"
+          export CC="clang -arch x86_64"
+          export CXX="clang++ -arch x86_64"
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig"
+          export CFLAGS="-O2 -Wno-error=implicit-function-declaration -I/usr/local/include"
+          export LDFLAGS="-L/usr/local/lib"
+          mkdir build && cd build
+          arch -x86_64 ../winecx/configure \
+            --enable-archs=i386,x86_64 \
+            --disable-tests \
+            --without-x --without-wayland --without-vulkan --without-gstreamer \
+            --without-oss --without-alsa --without-pulse --without-sane \
+            --without-usb --without-v4l2 --without-pcap --without-capi \
+            --without-opencl --without-ffmpeg --without-cups \
+            --prefix=/opt/whiskywine || { cat config.log | tail -80; exit 1; }
+
+      - name: make
+        run: |
+          export PATH="/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:$PWD/llvm-mingw/bin:$PATH"
+          cd build
+          arch -x86_64 make -j"$(sysctl -n hw.ncpu)"
+
+      - name: install and package
+        run: |
+          cd build
+          arch -x86_64 make install DESTDIR="$PWD/../staging"
+          cd ..
+          mkdir -p Libraries/Wine
+          cp -R staging/opt/whiskywine/bin Libraries/Wine/bin
+          cp -R staging/opt/whiskywine/lib Libraries/Wine/lib
+          cp -R staging/opt/whiskywine/share Libraries/Wine/share
+          # bundle the x86_64 brew dylibs wine links against
+          mkdir -p Libraries/Wine/lib/deps
+          for lib in $(otool -L Libraries/Wine/bin/wine64 Libraries/Wine/lib/wine/x86_64-unix/*.so 2>/dev/null \
+            | awk '/\/usr\/local\//{print $1}' | sort -u); do
+            cp -L "$lib" Libraries/Wine/lib/ 2>/dev/null || true
+          done
+          cat > Libraries/WhiskyWineVersion.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>gptkCapable</key>
+            <true/>
+            <key>version</key>
+            <dict>
+              <key>major</key>
+              <integer>4</integer>
+              <key>minor</key>
+              <integer>0</integer>
+              <key>patch</key>
+              <integer>0</integer>
+            </dict>
+          </dict>
+          </plist>
+          PLIST
+          tar -czf Libraries.tar.gz Libraries
+          shasum -a 256 Libraries.tar.gz | tee Libraries.tar.gz.sha256
+
+      - name: upload runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: whiskywine-gptk-libraries
+          path: |
+            Libraries.tar.gz
+            Libraries.tar.gz.sha256
+          retention-days: 14
