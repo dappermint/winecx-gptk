@@ -101,6 +101,7 @@ jobs:
 
       - name: install and package
         run: |
+          export PATH="$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
           cd build
           make install DESTDIR="$PWD/../staging"
           cd ..
