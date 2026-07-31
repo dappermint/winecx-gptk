@@ -140,13 +140,26 @@ jobs:
             done
           done
 
+          # nix's libiconv is a stub that does not export _iconv, so anything
+          # bundled against it (libintl, and through it gnutls) fails to load.
+          # macOS ships a real iconv in /usr/lib; point every reference there
+          # and drop the nix copy.
+          rm -f "$LIBDIR"/libiconv*.dylib
+
           fixup() {
             local f="$1"
             local rel
             rel=$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[1], os.path.dirname(sys.argv[2])))" "$LIBDIR" "$f")
             chmod u+w "$f" 2>/dev/null || true
             for ref in $(scan "$f"); do
-              install_name_tool -change "$ref" "@loader_path/$rel/$(basename "$ref")" "$f" 2>/dev/null || true
+              case "$(basename "$ref")" in
+                libiconv*.dylib)
+                  install_name_tool -change "$ref" "/usr/lib/libiconv.2.dylib" "$f" 2>/dev/null || true
+                  ;;
+                *)
+                  install_name_tool -change "$ref" "@loader_path/$rel/$(basename "$ref")" "$f" 2>/dev/null || true
+                  ;;
+              esac
             done
             codesign -f -s - "$f" 2>/dev/null || true
           }
