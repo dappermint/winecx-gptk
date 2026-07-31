@@ -70,8 +70,9 @@ jobs:
       - name: configure
         run: |
           export PATH="$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
-          export CC="clang -arch x86_64"
-          export CXX="clang++ -arch x86_64"
+          export SDKROOT="$(/usr/bin/xcrun --show-sdk-path)"
+          export CC="/usr/bin/clang -arch x86_64"
+          export CXX="/usr/bin/clang++ -arch x86_64"
           export PKG_CONFIG_PATH="$NIX_PKG_CONFIG_PATH"
           export CFLAGS="-O2 -Wno-error=implicit-function-declaration $NIX_INCS"
           export LDFLAGS="$NIX_LDFS"
