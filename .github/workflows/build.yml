@@ -109,6 +109,10 @@ jobs:
           cp -R staging/opt/whiskywine/bin Libraries/Wine/bin
           cp -R staging/opt/whiskywine/lib Libraries/Wine/lib
           cp -R staging/opt/whiskywine/share Libraries/Wine/share
+          # CW HACK 22144: on apple without a preloader the loader expects its
+          # own binary to be named wineloader; whisky expects wine64
+          cp Libraries/Wine/bin/wine Libraries/Wine/bin/wineloader
+          ln -s wine Libraries/Wine/bin/wine64
 
           # bundle the nix dylib closure flat into Wine/lib and rewrite
           # store references to loader-relative so the tarball is portable
