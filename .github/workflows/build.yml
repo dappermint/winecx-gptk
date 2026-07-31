@@ -78,25 +78,30 @@ jobs:
           export ac_cv_lib_soname_freetype="libfreetype.6.dylib"
           export ac_cv_lib_soname_gnutls="libgnutls.30.dylib"
           mkdir build && cd build
-          arch -x86_64 ../winecx/configure \
+          ../winecx/configure \
+            --host=x86_64-apple-darwin24 \
             --enable-archs=i386,x86_64 \
             --disable-tests \
             --without-x --without-wayland --without-vulkan --without-gstreamer \
             --without-oss --without-alsa --without-pulse --without-sane \
             --without-usb --without-v4l2 --without-pcap --without-capi \
             --without-opencl --without-ffmpeg --without-cups \
-            --prefix=/opt/whiskywine || { tail -100 config.log; exit 1; }
+            --prefix=/opt/whiskywine || {
+              echo "==== core tests section ===="
+              sed -n '100,500p' config.log
+              exit 1
+            }
 
       - name: make
         run: |
           export PATH="$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
           cd build
-          arch -x86_64 make -j"$(sysctl -n hw.ncpu)"
+          make -j"$(sysctl -n hw.ncpu)"
 
       - name: install and package
         run: |
           cd build
-          arch -x86_64 make install DESTDIR="$PWD/../staging"
+          make install DESTDIR="$PWD/../staging"
           cd ..
           mkdir -p Libraries/Wine
           cp -R staging/opt/whiskywine/bin Libraries/Wine/bin
