@@ -17,30 +17,66 @@ jobs:
           /usr/sbin/softwareupdate --install-rosetta --agree-to-license || true
           arch -x86_64 /usr/bin/true && echo "rosetta ok"
 
+      - name: install nix
+        uses: DeterminateSystems/nix-installer-action@v14
+        with:
+          extra-conf: |
+            extra-platforms = x86_64-darwin
+
       - name: clone winecx
         run: git clone --depth 1 https://github.com/PhoenicisOrg/winecx.git winecx
 
-      - name: build tools (arm64, output is arch independent)
+      - name: llvm-mingw for the PE half
         run: |
-          brew install bison flex pkg-config
           curl -sL -o llvm-mingw.tar.xz \
             https://github.com/mstorsjo/llvm-mingw/releases/download/20260616/llvm-mingw-20260616-ucrt-macos-universal.tar.xz
           tar -xf llvm-mingw.tar.xz
           mv llvm-mingw-* llvm-mingw
 
-      - name: x86_64 homebrew for unix-side libs
+      - name: nix toolchain and x86_64 libs
         run: |
-          arch -x86_64 /bin/bash -c "NONINTERACTIVE=1 $(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          arch -x86_64 /usr/local/bin/brew install --quiet freetype gnutls
+          NIXPKGS="github:NixOS/nixpkgs/nixos-25.05"
+          tools=$(nix build --no-link --print-out-paths \
+            "$NIXPKGS#bison" "$NIXPKGS#flex" "$NIXPKGS#pkg-config")
+          toolpath=""
+          for t in $tools; do toolpath="$t/bin:$toolpath"; done
+          echo "NIX_TOOL_PATH=$toolpath" >> "$GITHUB_ENV"
+
+          outs=""
+          for p in freetype gnutls libpng zlib brotli bzip2 nettle libtasn1 libidn2 p11-kit libunistring gmp; do
+            for o in dev out; do
+              if path=$(nix build --no-link --print-out-paths \
+                "$NIXPKGS#legacyPackages.x86_64-darwin.$p.$o" 2>/dev/null); then
+                outs="$outs $path"
+              fi
+            done
+          done
+          echo "$outs" | tr ' ' '\n' | grep . > store-outs.txt
+          pcp=""
+          incs=""
+          ldfs=""
+          for d in $outs; do
+            [ -d "$d/lib/pkgconfig" ] && pcp="$d/lib/pkgconfig:$pcp"
+            [ -d "$d/include" ] && incs="$incs -I$d/include"
+            [ -d "$d/lib" ] && ldfs="$ldfs -L$d/lib"
+          done
+          {
+            echo "NIX_PKG_CONFIG_PATH=$pcp"
+            echo "NIX_INCS=$incs"
+            echo "NIX_LDFS=$ldfs"
+          } >> "$GITHUB_ENV"
+          cat store-outs.txt
 
       - name: configure
         run: |
-          export PATH="/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:$PWD/llvm-mingw/bin:$PATH"
+          export PATH="$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
           export CC="clang -arch x86_64"
           export CXX="clang++ -arch x86_64"
-          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig"
-          export CFLAGS="-O2 -Wno-error=implicit-function-declaration -I/usr/local/include"
-          export LDFLAGS="-L/usr/local/lib"
+          export PKG_CONFIG_PATH="$NIX_PKG_CONFIG_PATH"
+          export CFLAGS="-O2 -Wno-error=implicit-function-declaration $NIX_INCS"
+          export LDFLAGS="$NIX_LDFS"
+          export ac_cv_lib_soname_freetype="libfreetype.6.dylib"
+          export ac_cv_lib_soname_gnutls="libgnutls.30.dylib"
           mkdir build && cd build
           arch -x86_64 ../winecx/configure \
             --enable-archs=i386,x86_64 \
@@ -49,11 +85,11 @@ jobs:
             --without-oss --without-alsa --without-pulse --without-sane \
             --without-usb --without-v4l2 --without-pcap --without-capi \
             --without-opencl --without-ffmpeg --without-cups \
-            --prefix=/opt/whiskywine || { cat config.log | tail -80; exit 1; }
+            --prefix=/opt/whiskywine || { tail -100 config.log; exit 1; }
 
       - name: make
         run: |
-          export PATH="/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:$PWD/llvm-mingw/bin:$PATH"
+          export PATH="$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
           cd build
           arch -x86_64 make -j"$(sysctl -n hw.ncpu)"
 
@@ -66,12 +102,47 @@ jobs:
           cp -R staging/opt/whiskywine/bin Libraries/Wine/bin
           cp -R staging/opt/whiskywine/lib Libraries/Wine/lib
           cp -R staging/opt/whiskywine/share Libraries/Wine/share
-          # bundle the x86_64 brew dylibs wine links against
-          mkdir -p Libraries/Wine/lib/deps
-          for lib in $(otool -L Libraries/Wine/bin/wine64 Libraries/Wine/lib/wine/x86_64-unix/*.so 2>/dev/null \
-            | awk '/\/usr\/local\//{print $1}' | sort -u); do
-            cp -L "$lib" Libraries/Wine/lib/ 2>/dev/null || true
+
+          # bundle the nix dylib closure flat into Wine/lib and rewrite
+          # store references to loader-relative so the tarball is portable
+          LIBDIR="$PWD/Libraries/Wine/lib"
+          scan() { otool -L "$1" 2>/dev/null | awk '/\/nix\/store/{print $1}'; }
+
+          queue=""
+          for d in $(cat store-outs.txt); do
+            for so in libfreetype.6.dylib libgnutls.30.dylib; do
+              [ -f "$d/lib/$so" ] && queue="$queue $d/lib/$so"
+            done
           done
+          while [ -n "$queue" ]; do
+            next=""
+            for lib in $queue; do
+              base=$(basename "$lib")
+              [ -e "$LIBDIR/$base" ] && continue
+              cp -L "$lib" "$LIBDIR/$base"
+              chmod u+w "$LIBDIR/$base"
+              next="$next $(scan "$LIBDIR/$base" | tr '\n' ' ')"
+            done
+            queue=""
+            for l in $next; do
+              [ -e "$LIBDIR/$(basename "$l")" ] || queue="$queue $l"
+            done
+          done
+
+          fixup() {
+            local f="$1"
+            local rel
+            rel=$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[1], os.path.dirname(sys.argv[2])))" "$LIBDIR" "$f")
+            chmod u+w "$f" 2>/dev/null || true
+            for ref in $(scan "$f"); do
+              install_name_tool -change "$ref" "@loader_path/$rel/$(basename "$ref")" "$f" 2>/dev/null || true
+            done
+            codesign -f -s - "$f" 2>/dev/null || true
+          }
+          for f in "$LIBDIR"/*.dylib; do fixup "$f"; done
+          find Libraries/Wine/bin -type f | while read -r f; do fixup "$f"; done
+          find Libraries/Wine/lib/wine -name "*.so" | while read -r f; do fixup "$f"; done
+
           cat > Libraries/WhiskyWineVersion.plist <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
