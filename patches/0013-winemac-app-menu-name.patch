@@ -1,0 +1,80 @@
+Cocoa titles the application menu from the main bundle's CFBundleName, and
+a wine process has no bundle, so the menu reads a bare "Quit" and "Hide"
+instead of "Quit Steam" and "Hide Steam".  Derive a name from the running
+exe and use it when the bundle has none.
+
+Note this does NOT rename the Dock tile.  The Dock uses
+NSRunningApplication.localizedName, which is resolved from the bundle at
+launch; measured on macOS 27, mutating CFBundleName or calling
+setProcessName: afterwards leaves localizedName unchanged, while the same
+binary placed in a minimal .app bundle reports the bundle name from the
+start.  A true Dock name needs a real .app wrapper around the launch,
+which belongs to whatever creates the shortcut, not to the driver.
+
+diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
+index 034cbee..caf3f37 100644
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ -363,6 +363,17 @@ - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+             // Application menu
+             submenu = [[[NSMenu alloc] initWithTitle:WineLocalizedString(STRING_MENU_WINE)] autorelease];
+             bundleName = [[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString*)kCFBundleNameKey];
++            if (![bundleName length] && *app_name)
++            {
++                bundleName = [NSString stringWithUTF8String:app_name];
++                /* so anything else asking the bundle sees the same name */
++                @try
++                {
++                    [(NSMutableDictionary*)[[NSBundle mainBundle] infoDictionary]
++                        setObject:bundleName forKey:(NSString*)kCFBundleNameKey];
++                }
++                @catch (NSException *e) { }
++            }
+ 
+             if ([bundleName length])
+                 title = [NSString stringWithFormat:WineLocalizedString(STRING_MENU_ITEM_HIDE_APPNAME), bundleName];
+diff --git a/dlls/winemac.drv/macdrv_cocoa.h b/dlls/winemac.drv/macdrv_cocoa.h
+index 2277258..4efb12d 100644
+--- a/dlls/winemac.drv/macdrv_cocoa.h
++++ b/dlls/winemac.drv/macdrv_cocoa.h
+@@ -176,6 +176,7 @@
+ extern int retina_enabled;  /* Whether Retina mode is enabled via registry setting. */
+ extern int retina_on;       /* Whether Retina mode is currently active (enabled and display is in default mode). */
+ extern int enable_app_nap;
++extern char app_name[256];  /* Name to show in the application menu, derived from the exe. */
+ 
+ static inline CGRect cgrect_mac_from_win(CGRect rect)
+ {
+diff --git a/dlls/winemac.drv/macdrv_main.c b/dlls/winemac.drv/macdrv_main.c
+index f6f5d34..69f6aa0 100644
+--- a/dlls/winemac.drv/macdrv_main.c
++++ b/dlls/winemac.drv/macdrv_main.c
+@@ -43,6 +43,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(macdrv);
+ C_ASSERT(NUM_EVENT_TYPES <= sizeof(macdrv_event_mask) * 8);
+ 
+ int topmost_float_inactive = TOPMOST_FLOAT_INACTIVE_NONFULLSCREEN;
++char app_name[256];
+ int capture_displays_for_fullscreen = 0;
+ BOOL skip_single_buffer_flushes = FALSE;
+ BOOL allow_vsync = TRUE;
+@@ -315,6 +316,20 @@ static void setup_options(void)
+         }
+     }
+ 
++    /* Cocoa names the application menu after the main bundle, and a wine
++     * process has no bundle, so the menu ends up with a bare "Quit" instead of
++     * "Quit Steam".  Derive a name from the exe for it to use. */
++    {
++        static const WCHAR dotexeW[] = {'.','e','x','e',0};
++        DWORD name_len = len;
++        SIZE_T utf8_len;
++
++        if (name_len > 4 && !wcsicmp(appname + name_len - 4, dotexeW)) name_len -= 4;
++        if (name_len && !RtlUnicodeToUTF8N(app_name, sizeof(app_name) - 1, &utf8_len,
++                                           appname, name_len * sizeof(WCHAR)))
++            app_name[utf8_len] = 0;
++    }
++
+     if (!get_config_key(hkey, appkey, "WindowsFloatWhenInactive", buffer, sizeof(buffer)))
+     {
+         static const WCHAR noneW[] = {'n','o','n','e',0};
