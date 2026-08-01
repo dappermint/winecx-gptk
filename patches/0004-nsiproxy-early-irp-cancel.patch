@@ -1,0 +1,41 @@
+Backport of wine 2dc4cfe77d8cc5ca256dca5fbcc1b7134ca3d383
+"nsiproxy: Fix check for early IRP cancellation." (Matteo Bruni, 2025-09-05)
+
+IoSetCancelRoutine() returns the *previous* cancel routine.  A non-NULL
+return means our routine was still installed, so the cancel routine has
+not run and never will, and this thread owns completing the IRP.  The
+test was inverted, so an IRP cancelled before the routine was installed
+got queued and never completed, while one whose routine had already run
+got completed twice.
+
+For the change notification path that leaves a cancelled IRP parked on
+notification_queue forever, which wedges the nsi notification thread and
+shows up as
+  err:sync:RtlpWaitForCriticalSection ... "ntoskrnl.c: irp_completion_cs"
+  wait timed out in thread <nsi_notification>, blocked by <sechost_service>
+
+Upstream had already rewritten the icmp echo path by the time of the fix,
+so the first hunk lands in nsiproxy_icmp_echo() here rather than in
+handle_send_echo(); the check and its justification are identical.
+
+diff --git a/dlls/nsiproxy.sys/device.c b/dlls/nsiproxy.sys/device.c
+--- a/dlls/nsiproxy.sys/device.c
++++ b/dlls/nsiproxy.sys/device.c
+@@ -252,7 +252,7 @@ static NTSTATUS nsiproxy_icmp_echo( IRP *irp )
+     EnterCriticalSection( &nsiproxy_cs );
+
+     IoSetCancelRoutine( irp, icmp_echo_cancel );
+-    if (irp->Cancel && !IoSetCancelRoutine( irp, NULL ))
++    if (irp->Cancel && IoSetCancelRoutine( irp, NULL ))
+     {
+         /* IRP was canceled before we set cancel routine */
+         InitializeListHead( &irp->Tail.Overlay.ListEntry );
+@@ -299,7 +299,7 @@ static NTSTATUS nsiproxy_change_notification( IRP *irp )
+
+     EnterCriticalSection( &nsiproxy_cs );
+     IoSetCancelRoutine( irp, change_notification_cancel );
+-    if (irp->Cancel && !IoSetCancelRoutine( irp, NULL ))
++    if (irp->Cancel && IoSetCancelRoutine( irp, NULL ))
+     {
+         /* IRP was canceled before we set cancel routine */
+         InitializeListHead( &irp->Tail.Overlay.ListEntry );
