@@ -43,7 +43,7 @@ jobs:
           echo "NIX_TOOL_PATH=$toolpath" >> "$GITHUB_ENV"
 
           outs=""
-          for p in freetype gnutls libpng zlib brotli bzip2 nettle libtasn1 libidn2 p11-kit libunistring gmp; do
+          for p in freetype gnutls libpng zlib brotli bzip2 nettle libtasn1 libidn2 p11-kit libunistring gmp moltenvk vulkan-headers; do
             for o in dev out; do
               if path=$(nix build --no-link --print-out-paths \
                 "$NIXPKGS#legacyPackages.x86_64-darwin.$p.$o" 2>/dev/null); then
@@ -78,12 +78,15 @@ jobs:
           export LDFLAGS="$NIX_LDFS"
           export ac_cv_lib_soname_freetype="libfreetype.6.dylib"
           export ac_cv_lib_soname_gnutls="libgnutls.30.dylib"
+          # wine dlopens MoltenVK by soname; the bundled copy is found via
+          # the loader fallback path whisky already sets for its runtime
+          export ac_cv_lib_soname_MoltenVK="libMoltenVK.dylib"
           mkdir build && cd build
           ../winecx/configure \
             --host=x86_64-apple-darwin24 \
             --enable-archs=i386,x86_64 \
             --disable-tests \
-            --without-x --without-wayland --without-vulkan --without-gstreamer \
+            --without-x --without-wayland --without-gstreamer \
             --without-oss --without-alsa --without-pulse --without-sane \
             --without-usb --without-v4l2 --without-pcap --without-capi \
             --without-opencl --without-ffmpeg --without-cups \
@@ -121,7 +124,7 @@ jobs:
 
           queue=""
           for d in $(cat store-outs.txt); do
-            for so in libfreetype.6.dylib libgnutls.30.dylib; do
+            for so in libfreetype.6.dylib libgnutls.30.dylib libMoltenVK.dylib; do
               [ -f "$d/lib/$so" ] && queue="$queue $d/lib/$so"
             done
           done
