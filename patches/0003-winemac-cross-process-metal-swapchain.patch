@@ -1,0 +1,506 @@
+diff --git i/dlls/winemac.drv/cocoa_window.m w/dlls/winemac.drv/cocoa_window.m
+index c5fbaef..ece7dc5 100644
+--- i/dlls/winemac.drv/cocoa_window.m
++++ w/dlls/winemac.drv/cocoa_window.m
+@@ -53,6 +53,25 @@ - (void)_setPreventsActivation:(BOOL)flag;
+ 
+ @end
+ 
++typedef uint32_t CGSConnectionID;
++extern CGSConnectionID CGSMainConnectionID(void);
++
++typedef uint32_t CAContextID;
++
++@interface CAContext : NSObject
++
+++ (id) contextWithCGSConnection:(CGSConnectionID)connection options:(NSDictionary*)options;
++@property(readonly) CAContextID contextId;
++@property(retain) CALayer* layer;
++
++@end
++
++@interface CALayerHost : CALayer
++
++- (void) setContextId:(CAContextID)contextId;
++
++@end
++
+ 
+ static NSUInteger style_mask_for_features(const struct macdrv_window_features* wf)
+ {
+@@ -382,6 +401,7 @@ @interface WineContentView : WineBaseView <NSTextInputClient, NSViewLayerContent
+     int backingSize[2];
+ 
+     WineMetalView *_metalView;
++    NSMutableDictionary<NSNumber*, CALayerHost*>* _caLayerHosts;
+ }
+ 
+ @property (readonly, nonatomic) BOOL everHadGLContext;
+@@ -394,6 +414,8 @@ - (void) wine_getBackingSize:(int*)outBackingSize;
+     - (void) wine_setBackingSize:(const int*)newBackingSize;
+ 
+     - (WineMetalView*) newMetalViewWithDevice:(id<MTLDevice>)device;
++    - (void) addCALayerHostViewWithContextId:(CAContextID)contextId;
++    - (void) removeCALayerHostView:(CAContextID)contextId;
+ 
+ @end
+ 
+@@ -502,6 +524,7 @@ - (void) dealloc
+         [markedText release];
+         [glContexts release];
+         [pendingGlContexts release];
++        [_caLayerHosts release];
+         CGImageRelease(colorImage);
+         CGImageRelease(shapeImage);
+         [super dealloc];
+@@ -705,6 +728,33 @@ - (WineMetalView*) newMetalViewWithDevice:(id<MTLDevice>)device
+         return _metalView;
+     }
+ 
++    - (void) addCALayerHostViewWithContextId:(CAContextID)contextId
++    {
++        if (!_caLayerHosts)
++            _caLayerHosts = [[NSMutableDictionary alloc] init];
++
++        [self removeCALayerHostView:contextId];
++
++        CALayerHost* host = [CALayerHost layer];
++        [host setContextId:contextId];
++        host.magnificationFilter = kCAFilterNearest;
++        host.contentsScale = retina_on ? 2.0 : 1.0;
++        host.frame = self.layer.bounds;
++        host.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
++
++        [self.layer addSublayer:host];
++        [_caLayerHosts setObject:host forKey:@(contextId)];
++
++        [(WineWindow*)self.window windowDidDrawContent];
++    }
++
++    - (void) removeCALayerHostView:(CAContextID)contextId
++    {
++        NSNumber* key = @(contextId);
++        [[_caLayerHosts objectForKey:key] removeFromSuperlayer];
++        [_caLayerHosts removeObjectForKey:key];
++    }
++
+     - (void) setLayerRetinaProperties:(int)mode
+     {
+         [self layer].contentsScale = mode ? 2.0 : 1.0;
+@@ -741,6 +791,9 @@ - (void) setRetinaMode:(int)mode
+         [self updateGLContexts];
+         [self setLayerRetinaProperties:mode];
+ 
++        for (CALayerHost* host in [_caLayerHosts allValues])
++            host.contentsScale = mode ? 2.0 : 1.0;
++
+         [super setRetinaMode:mode];
+     }
+ 
+@@ -4026,6 +4079,195 @@ void macdrv_view_release_metal_view(macdrv_metal_view v)
+     });
+ }
+ 
++@protocol WineMetalSwapChain <NSObject>
++
++- (CAMetalLayer*) layer;
++
++@end
++
++@interface MetalViewSwapChain : NSObject <WineMetalSwapChain>
++{
++    macdrv_metal_device device;
++    macdrv_metal_view metal_view;
++}
++
++- (instancetype) initWithView:(macdrv_view)view;
++
++@end
++
++@implementation MetalViewSwapChain
++
++- (instancetype) initWithView:(macdrv_view)view
++{
++    self = [super init];
++    if (!self) return nil;
++
++    if (!(device = macdrv_create_metal_device()))
++    {
++        [self release];
++        return nil;
++    }
++    if (!(metal_view = macdrv_view_create_metal_view(view, device)))
++    {
++        macdrv_release_metal_device(device);
++        device = NULL;
++        [self release];
++        return nil;
++    }
++    return self;
++}
++
++- (CAMetalLayer*) layer
++{
++    return (CAMetalLayer*)macdrv_view_get_metal_layer(metal_view);
++}
++
++- (void) dealloc
++{
++    if (metal_view) macdrv_view_release_metal_view(metal_view);
++    if (device) macdrv_release_metal_device(device);
++    [super dealloc];
++}
++
++@end
++
++@interface CAContextSwapChain : NSObject <WineMetalSwapChain>
++{
++    void* hwnd;
++    macdrv_metal_device device;
++    CAMetalLayer* offscreen_layer;
++    CAContext* remote_context;
++    CAContextID context_id;
++}
++
++- (instancetype) initWithHwnd:(void*)hwnd bounds:(CGRect)bounds;
++
++@end
++
++@implementation CAContextSwapChain
++
++- (instancetype) initWithHwnd:(void*)newHwnd bounds:(CGRect)bounds
++{
++    self = [super init];
++    if (!self) return nil;
++
++    hwnd = newHwnd;
++    if (!(device = macdrv_create_metal_device()))
++    {
++        [self release];
++        return nil;
++    }
++
++    offscreen_layer = [[CAMetalLayer alloc] init];
++    if (!offscreen_layer)
++    {
++        macdrv_release_metal_device(device);
++        device = NULL;
++        [self release];
++        return nil;
++    }
++
++    offscreen_layer.device = (id<MTLDevice>)device;
++    offscreen_layer.framebufferOnly = YES;
++    offscreen_layer.magnificationFilter = kCAFilterNearest;
++    offscreen_layer.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
++    offscreen_layer.contentsScale = retina_on ? 2.0 : 1.0;
++    [offscreen_layer setBounds:cgrect_mac_from_win(bounds)];
++    [offscreen_layer setAnchorPoint:CGPointMake(0, 0)];
++
++    /* Export the CAMetalLayer from the rendering process, then have the
++     * target HWND's owner host it using CALayerHost. */
++    OnMainThread(^{
++        remote_context = [[CAContext contextWithCGSConnection:CGSMainConnectionID()
++                                                      options:[NSDictionary dictionary]] retain];
++        [remote_context setLayer:offscreen_layer];
++        context_id = [remote_context contextId];
++    });
++
++    if (!remote_context || !context_id)
++    {
++        [self release];
++        return nil;
++    }
++
++    macdrv_create_remote_layer(hwnd, context_id);
++    return self;
++}
++
++- (CAMetalLayer*) layer
++{
++    return offscreen_layer;
++}
++
++- (void) dealloc
++{
++    if (context_id) macdrv_release_remote_layer(hwnd, context_id);
++    CAContext *context = remote_context;
++    CAMetalLayer *layer = offscreen_layer;
++    macdrv_metal_device dev = device;
++
++    OnMainThreadAsync(^{
++        [context setLayer:nil];
++        [context release];
++        [layer release];
++        if (dev) macdrv_release_metal_device(dev);
++    });
++
++    [super dealloc];
++}
++
++@end
++
++macdrv_metal_swapchain macdrv_create_view_swapchain(macdrv_view v)
++{
++    return (macdrv_metal_swapchain)[[MetalViewSwapChain alloc] initWithView:v];
++}
++
++macdrv_metal_swapchain macdrv_create_offscreen_swapchain(void* hwnd, CGRect bounds)
++{
++    return (macdrv_metal_swapchain)[[CAContextSwapChain alloc] initWithHwnd:hwnd bounds:bounds];
++}
++
++macdrv_metal_layer macdrv_swapchain_get_layer(macdrv_metal_swapchain swapchain)
++{
++    return (macdrv_metal_layer)[(id<WineMetalSwapChain>)swapchain layer];
++}
++
++void macdrv_destroy_swapchain(macdrv_metal_swapchain swapchain)
++{
++    [(id<WineMetalSwapChain>)swapchain release];
++}
++
++void macdrv_window_create_ca_layer_host_view(macdrv_window w, unsigned int context_id)
++{
++@autoreleasepool
++{
++    WineWindow* window = (WineWindow*)w;
++
++    OnMainThread(^{
++        NSView* content_view = [window contentView];
++
++        if ([content_view isKindOfClass:[WineContentView class]])
++            [(WineContentView*)content_view addCALayerHostViewWithContextId:context_id];
++    });
++}
++}
++
++void macdrv_window_release_ca_layer_host_view(macdrv_window w, unsigned int context_id)
++{
++@autoreleasepool
++{
++    WineWindow* window = (WineWindow*)w;
++
++    OnMainThread(^{
++        NSView* content_view = [window contentView];
++
++        if ([content_view isKindOfClass:[WineContentView class]])
++            [(WineContentView*)content_view removeCALayerHostView:context_id];
++    });
++}
++}
++
+ int macdrv_get_view_backing_size(macdrv_view v, int backing_size[2])
+ {
+     WineContentView* view = (WineContentView*)v;
+diff --git i/dlls/winemac.drv/macdrv.h w/dlls/winemac.drv/macdrv.h
+index 93fe34c..82f8971 100644
+--- i/dlls/winemac.drv/macdrv.h
++++ w/dlls/winemac.drv/macdrv.h
+@@ -104,6 +104,8 @@ static inline RECT rect_from_cgrect(CGRect cgrect)
+ {
+     WM_MACDRV_SET_WIN_REGION = WM_WINE_FIRST_DRIVER_MSG,
+     WM_MACDRV_ACTIVATE_ON_FOLLOWING_FOCUS,
++    WM_MACDRV_CREATE_REMOTE_LAYER,
++    WM_MACDRV_RELEASE_REMOTE_LAYER,
+ };
+ 
+ struct macdrv_thread_data
+diff --git i/dlls/winemac.drv/macdrv_cocoa.h w/dlls/winemac.drv/macdrv_cocoa.h
+index 2277258..2227e2e 100644
+--- i/dlls/winemac.drv/macdrv_cocoa.h
++++ w/dlls/winemac.drv/macdrv_cocoa.h
+@@ -146,6 +146,7 @@
+ typedef struct macdrv_opaque_metal_device* macdrv_metal_device;
+ typedef struct macdrv_opaque_metal_view* macdrv_metal_view;
+ typedef struct macdrv_opaque_metal_layer* macdrv_metal_layer;
++typedef struct macdrv_opaque_metal_swapchain* macdrv_metal_swapchain;
+ typedef struct macdrv_opaque_status_item* macdrv_status_item;
+ struct macdrv_event;
+ struct macdrv_query;
+@@ -592,6 +593,14 @@ extern void macdrv_order_cocoa_window(macdrv_window w, macdrv_window prev,
+ extern macdrv_metal_view macdrv_view_create_metal_view(macdrv_view v, macdrv_metal_device d);
+ extern macdrv_metal_layer macdrv_view_get_metal_layer(macdrv_metal_view v);
+ extern void macdrv_view_release_metal_view(macdrv_metal_view v);
++extern macdrv_metal_swapchain macdrv_create_view_swapchain(macdrv_view v);
++extern macdrv_metal_swapchain macdrv_create_offscreen_swapchain(void* hwnd, CGRect bounds);
++extern macdrv_metal_layer macdrv_swapchain_get_layer(macdrv_metal_swapchain swapchain);
++extern void macdrv_destroy_swapchain(macdrv_metal_swapchain swapchain);
++extern void macdrv_window_create_ca_layer_host_view(macdrv_window w, unsigned int context_id);
++extern void macdrv_window_release_ca_layer_host_view(macdrv_window w, unsigned int context_id);
++extern void macdrv_create_remote_layer(void* hwnd, unsigned int context_id);
++extern void macdrv_release_remote_layer(void* hwnd, unsigned int context_id);
+ extern int macdrv_get_view_backing_size(macdrv_view v, int backing_size[2]);
+ extern void macdrv_set_view_backing_size(macdrv_view v, const int backing_size[2]);
+ extern uint32_t macdrv_window_background_color(void);
+diff --git i/dlls/winemac.drv/vulkan.c w/dlls/winemac.drv/vulkan.c
+index 8b375b6..a4cdc10 100644
+--- i/dlls/winemac.drv/vulkan.c
++++ w/dlls/winemac.drv/vulkan.c
+@@ -51,8 +51,7 @@ typedef VkFlags VkMetalSurfaceCreateFlagsEXT;
+ 
+ struct wine_vk_surface
+ {
+-    macdrv_metal_device device;
+-    macdrv_metal_view view;
++    macdrv_metal_swapchain swapchain;
+ };
+ 
+ typedef struct VkMacOSSurfaceCreateInfoMVK
+@@ -79,11 +78,8 @@ static const struct vulkan_driver_funcs macdrv_vulkan_driver_funcs;
+ 
+ static void wine_vk_surface_destroy(struct wine_vk_surface *surface)
+ {
+-    if (surface->view)
+-        macdrv_view_release_metal_view(surface->view);
+-
+-    if (surface->device)
+-        macdrv_release_metal_device(surface->device);
++    if (surface->swapchain)
++        macdrv_destroy_swapchain(surface->swapchain);
+ 
+     free(surface);
+ }
+@@ -93,34 +89,42 @@ static VkResult macdrv_vulkan_surface_create(HWND hwnd, VkInstance instance, VkS
+     VkResult res;
+     struct wine_vk_surface *mac_surface;
+     struct macdrv_win_data *data;
++    RECT rect;
+ 
+     TRACE("%p %p %p %p\n", hwnd, instance, surface, private);
+ 
+-    if (!(data = get_win_data(hwnd)))
+-    {
+-        FIXME("DC for window %p of other process: not implemented\n", hwnd);
+-        return VK_ERROR_INCOMPATIBLE_DRIVER;
+-    }
+-
+     mac_surface = calloc(1, sizeof(*mac_surface));
+-    if (!mac_surface)
++    if (!mac_surface) return VK_ERROR_OUT_OF_HOST_MEMORY;
++
++    if ((data = get_win_data(hwnd)))
+     {
++        mac_surface->swapchain = macdrv_create_view_swapchain(data->client_cocoa_view);
+         release_win_data(data);
+-        return VK_ERROR_OUT_OF_HOST_MEMORY;
++    }
++    else
++    {
++        /* The window belongs to another process, so we have no way of reaching
++         * its Cocoa views.  Render into an offscreen layer instead and have the
++         * owning process host it. */
++        if (NtUserGetAncestor(hwnd, GA_ROOT) != hwnd)
++        {
++            FIXME("Cross-process child window Metal swapchains are not implemented\n");
++            free(mac_surface);
++            return VK_ERROR_INCOMPATIBLE_DRIVER;
++        }
++
++        if (!NtUserGetClientRect(hwnd, &rect, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI)))
++        {
++            free(mac_surface);
++            return VK_ERROR_INCOMPATIBLE_DRIVER;
++        }
++
++        mac_surface->swapchain = macdrv_create_offscreen_swapchain(hwnd, cgrect_from_rect(rect));
+     }
+ 
+-    mac_surface->device = macdrv_create_metal_device();
+-    if (!mac_surface->device)
++    if (!mac_surface->swapchain)
+     {
+-        ERR("Failed to allocate Metal device for hwnd=%p\n", hwnd);
+-        res = VK_ERROR_OUT_OF_HOST_MEMORY;
+-        goto err;
+-    }
+-
+-    mac_surface->view = macdrv_view_create_metal_view(data->client_cocoa_view, mac_surface->device);
+-    if (!mac_surface->view)
+-    {
+-        ERR("Failed to allocate Metal view for hwnd=%p\n", hwnd);
++        ERR("Failed to create Metal swapchain for hwnd=%p\n", hwnd);
+ 
+         /* VK_KHR_win32_surface only allows out of host and device memory as errors. */
+         res = VK_ERROR_OUT_OF_HOST_MEMORY;
+@@ -133,7 +137,7 @@ static VkResult macdrv_vulkan_surface_create(HWND hwnd, VkInstance instance, VkS
+         create_info_host.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
+         create_info_host.pNext = NULL;
+         create_info_host.flags = 0; /* reserved */
+-        create_info_host.pLayer = macdrv_view_get_metal_layer(mac_surface->view);
++        create_info_host.pLayer = macdrv_swapchain_get_layer(mac_surface->swapchain);
+ 
+         res = pvkCreateMetalSurfaceEXT(instance, &create_info_host, NULL /* allocator */, surface);
+     }
+@@ -143,7 +147,7 @@ static VkResult macdrv_vulkan_surface_create(HWND hwnd, VkInstance instance, VkS
+         create_info_host.sType = VK_STRUCTURE_TYPE_MACOS_SURFACE_CREATE_INFO_MVK;
+         create_info_host.pNext = NULL;
+         create_info_host.flags = 0; /* reserved */
+-        create_info_host.pView = macdrv_view_get_metal_layer(mac_surface->view);
++        create_info_host.pView = macdrv_swapchain_get_layer(mac_surface->swapchain);
+ 
+         res = pvkCreateMacOSSurfaceMVK(instance, &create_info_host, NULL /* allocator */, surface);
+     }
+@@ -153,8 +157,6 @@ static VkResult macdrv_vulkan_surface_create(HWND hwnd, VkInstance instance, VkS
+         goto err;
+     }
+ 
+-    release_win_data(data);
+-
+     *private = mac_surface;
+ 
+     TRACE("Created surface=0x%s, private=%p\n", wine_dbgstr_longlong(*surface), *private);
+@@ -162,7 +164,6 @@ static VkResult macdrv_vulkan_surface_create(HWND hwnd, VkInstance instance, VkS
+ 
+ err:
+     wine_vk_surface_destroy(mac_surface);
+-    release_win_data(data);
+     return res;
+ }
+ 
+diff --git i/dlls/winemac.drv/window.c w/dlls/winemac.drv/window.c
+index 5ebc993..6842f2d 100644
+--- i/dlls/winemac.drv/window.c
++++ w/dlls/winemac.drv/window.c
+@@ -1763,6 +1763,22 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+         activate_on_following_focus();
+         TRACE("WM_MACDRV_ACTIVATE_ON_FOLLOWING_FOCUS time %u\n", activate_on_focus_time);
+         return 0;
++    case WM_MACDRV_CREATE_REMOTE_LAYER:
++        if ((data = get_win_data(hwnd)))
++        {
++            TRACE("WM_MACDRV_CREATE_REMOTE_LAYER context_id %u\n", (unsigned int)lp);
++            if (data->cocoa_window) macdrv_window_create_ca_layer_host_view(data->cocoa_window, (unsigned int)lp);
++            release_win_data(data);
++        }
++        return 0;
++    case WM_MACDRV_RELEASE_REMOTE_LAYER:
++        if ((data = get_win_data(hwnd)))
++        {
++            TRACE("WM_MACDRV_RELEASE_REMOTE_LAYER context_id %u\n", (unsigned int)lp);
++            if (data->cocoa_window) macdrv_window_release_ca_layer_host_view(data->cocoa_window, (unsigned int)lp);
++            release_win_data(data);
++        }
++        return 0;
+     }
+ 
+     FIXME("unrecognized window msg %x hwnd %p wp %lx lp %lx\n", msg, hwnd, (unsigned long)wp, lp);
+@@ -1770,6 +1786,18 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+ }
+ 
+ 
++void macdrv_create_remote_layer(void* hwnd_ptr, unsigned int context_id)
++{
++    NtUserPostMessage((HWND)hwnd_ptr, WM_MACDRV_CREATE_REMOTE_LAYER, 0, context_id);
++}
++
++
++void macdrv_release_remote_layer(void* hwnd_ptr, unsigned int context_id)
++{
++    NtUserPostMessage((HWND)hwnd_ptr, WM_MACDRV_RELEASE_REMOTE_LAYER, 0, context_id);
++}
++
++
+ /***********************************************************************
+  *              WindowPosChanging   (MACDRV.@)
+  */
