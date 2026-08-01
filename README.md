@@ -11,4 +11,12 @@ what the workflow does:
 - first cut is minimal: no vulkan (no dxvk), no gstreamer, freetype + gnutls from x86_64 homebrew
 - packages a whisky `Libraries.tar.gz` with `gptkCapable` set in the version plist
 
+## patches
+
+`patches/` is applied to the winecx tree after cloning.
+
+**0001, ntdll: don't call a foreign personality routine as an SEH handler.** `virtual_unwind()` leaves `LDR_DATA_TABLE_ENTRY *module` uninitialised, and `LdrFindEntryForAddress` does not touch it when it fails. so for a fault in Mach-O code with no PE module, the existing `!module` guard ("calling personality routine in system library not supported yet") reads garbage and never fires. wine then calls the dylib's libunwind personality routine as a windows exception handler. it returns 3, which wine reads as `ExceptionCollidedUnwind` (under the itanium unwind ABI 3 is `_URC_FATAL_PHASE1_ERROR`, the two enums simply do not correspond), and `call_seh_handlers` re-enters `RtlVirtualUnwind` with `FunctionEntry == NULL` **and** `handler_data == NULL`. `RtlVirtualUnwind2`'s leaf path writes `*data` unconditionally, so it faults at `RtlVirtualUnwind2+0x602`, which raises another exception on the same path and recurses ~0xfc0 of stack per pass until the thread dies of stack overflow. initialising `module` to NULL makes the guard work; the second hunk guards the `*data` store as well. measured on steam's webhelper: 255 collided unwinds and 775 access violations per 70s run on this build, versus 0 and 12 on stock wine 11.
+
+**0002, advapi32: report the real username by default.** CrossOver Hack 12735 pins `GetUserNameA/W` to the literal `"crossover"` unless `CX_REPORT_REAL_USERNAME` is set. wine salts its DPAPI key with `GetUserNameA` (`crypt32/protectdata.c`), so a blob sealed by a stock wine prefix cannot be opened here even though the user SID is identical. that breaks any bottle shared with a stock wine runtime, including chromium's `os_crypt` key and therefore steam's saved login token. the hack is flipped to opt-in via `CX_CONSISTENT_USERNAME`.
+
 the apple payload is never bundled. import your own gptk evaluation environment dmg, the whisky importer from #164 deploys it onto capable runtimes automatically.

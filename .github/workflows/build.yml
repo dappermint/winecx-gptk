@@ -26,6 +26,13 @@ jobs:
       - name: clone winecx
         run: git clone --depth 1 https://github.com/PhoenicisOrg/winecx.git winecx
 
+      - name: apply patches
+        run: |
+          for p in "$PWD"/patches/*.patch; do
+            echo "applying $(basename "$p")"
+            git -C winecx apply --verbose "$p"
+          done
+
       - name: llvm-mingw for the PE half
         run: |
           curl -sL -o llvm-mingw.tar.xz \
