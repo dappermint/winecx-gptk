@@ -1,0 +1,31 @@
+Backport of wine 56a4347acac16b1445a55719e1fddd9c6f9581b5
+
+From 56a4347acac16b1445a55719e1fddd9c6f9581b5 Mon Sep 17 00:00:00 2001
+From: Giovanni Mascellani <gmascellani@codeweavers.com>
+Date: Wed, 10 Dec 2025 12:43:23 +0100
+Subject: [PATCH] winecoreaudio.drv: Avoid a division by zero.
+
+This can happen if nSamplesPerSec is too small, and it leads to
+a crash.
+---
+ dlls/winecoreaudio.drv/coreaudio.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/dlls/winecoreaudio.drv/coreaudio.c b/dlls/winecoreaudio.drv/coreaudio.c
+index da2ae2dd67..3957cf40cf 100644
+--- a/dlls/winecoreaudio.drv/coreaudio.c
++++ b/dlls/winecoreaudio.drv/coreaudio.c
+@@ -742,6 +742,13 @@ static NTSTATUS unix_create_stream(void *args)
+ 
+     stream->period = params->period;
+     stream->period_frames = muldiv(params->period, stream->fmt->nSamplesPerSec, 10000000);
++
++    if (stream->period_frames == 0)
++    {
++        params->result = E_INVALIDARG;
++        goto end;
++    }
++
+     stream->dev_id = dev_id_from_device(params->device);
+     stream->flow = params->flow;
+     stream->flags = params->flags;
