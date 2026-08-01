@@ -1,0 +1,77 @@
+Three bugs found auditing the macOS paths of nsiproxy.  All three are
+present in wine master (11.14) as well, none has an upstream fix yet.
+
+1. tcp.c / udp.c leak the IPv6 address scope table on every connection
+   table enumeration.  get_ipv6_addr_scope_table() returns a malloc'd
+   table that the caller owns; both enumerators free only their own
+   endpoint/connection buffer.  nsiproxy runs inside the long lived
+   winedevice.exe, and anything polling GetTcpTable/GetUdpTable (Steam
+   and Chromium both do) leaks a little on every poll, without bound.
+
+2. ipv4_forward_enumerate_all() checks whether a sockaddr runs past the
+   end of the route message, logs an ERR, and then reads it anyway.  The
+   check as written prevents nothing.  Bail out of the address loop
+   instead, and clamp the copy into the fixed size sockaddr_in so a
+   sa_len larger than the destination cannot smash the stack.
+
+3. get_ipv6_addr_scope_table() dereferences ifa_addr without checking it
+   for NULL.  getifaddrs(3) documents that ifa_addr may be NULL, and
+   wine's own ip.c guards it in four other places (lines 841, 858, 1069
+   and 1126 in master).  Only this one site does not.  Not observed
+   firing on the test machine, where all 49 interfaces have an address,
+   so this is a latent crash rather than one seen in practice.
+
+diff --git a/dlls/nsiproxy.sys/ip.c b/dlls/nsiproxy.sys/ip.c
+index 32ba624..fe44706 100644
+--- a/dlls/nsiproxy.sys/ip.c
++++ b/dlls/nsiproxy.sys/ip.c
+@@ -1411,6 +1411,7 @@ static NTSTATUS ipv4_forward_enumerate_all( void *key_data, UINT key_size, void
+                 {
+                     ERR( "struct sockaddr extends beyond the route message, %p > %p\n",
+                          addr_ptr + sa->sa_len, next + rtm->rtm_msglen );
++                    break;
+                 }
+ 
+                 if (sa->sa_len) addr_ptr += (sa->sa_len + sizeof(int)-1) & ~(sizeof(int)-1);
+@@ -1427,7 +1428,7 @@ static NTSTATUS ipv4_forward_enumerate_all( void *key_data, UINT key_size, void
+                      * 5 bytes (1 sa_len, 1 sa_family, 2 sa_port and 1 for the first
+                      * byte of sin_addr). */
+                     struct sockaddr_in sin = {0};
+-                    memcpy( &sin, sa, sa->sa_len );
++                    memcpy( &sin, sa, min( sa->sa_len, sizeof(sin) ) );
+                     addr = sin.sin_addr;
+                     break;
+                 }
+diff --git a/dlls/nsiproxy.sys/tcp.c b/dlls/nsiproxy.sys/tcp.c
+index 6b1bb9f..d7a0b63 100644
+--- a/dlls/nsiproxy.sys/tcp.c
++++ b/dlls/nsiproxy.sys/tcp.c
+@@ -239,7 +239,7 @@ struct ipv6_addr_scope *get_ipv6_addr_scope_table( unsigned int *size )
+             struct sockaddr_in6 *sin6;
+             struct ipv6_addr_scope *entry;
+ 
+-            if (cur->ifa_addr->sa_family != AF_INET6) continue;
++            if (!cur->ifa_addr || cur->ifa_addr->sa_family != AF_INET6) continue;
+ 
+             if (++num > table_size)
+             {
+@@ -386,6 +386,7 @@ static NTSTATUS tcp_conns_enumerate_all( UINT filter, struct nsi_tcp_conn_key *k
+         }
+     }
+ 
++    free( addr_scopes );
+     free( connections );
+     return STATUS_SUCCESS;
+ }
+diff --git a/dlls/nsiproxy.sys/udp.c b/dlls/nsiproxy.sys/udp.c
+index 7bb93c9..0e24143 100644
+--- a/dlls/nsiproxy.sys/udp.c
++++ b/dlls/nsiproxy.sys/udp.c
+@@ -282,6 +282,7 @@ static NTSTATUS udp_endpoint_enumerate_all( void *key_data, UINT key_size, void
+         }
+     }
+ 
++    free( addr_scopes );
+     free( endpoints );
+     return STATUS_SUCCESS;
+ }
