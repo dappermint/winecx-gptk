@@ -229,6 +229,15 @@ jobs:
           # the reference runtime ships both names; match it
           ln -sf libfreetype.6.dylib "$LIBDIR/libfreetype.dylib"
 
+          # the unix modules dlopen libgnutls/libfreetype/libMoltenVK by bare
+          # soname. dlopen searches the caller's rpaths, and lib/wine/<arch>-unix
+          # is two levels below the bundled dylibs, so without this entry none of
+          # them resolve: no tls, no fonts, no vulkan. reference runtimes carry it.
+          for f in Libraries/Wine/lib/wine/*-unix/*.so; do
+            install_name_tool -add_rpath "@loader_path/../../" "$f" 2>/dev/null || true
+            codesign -f -s - "$f" 2>/dev/null || true
+          done
+
           cat > Libraries/WhiskyWineVersion.plist <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
