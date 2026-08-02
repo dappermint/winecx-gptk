@@ -5,6 +5,12 @@ on:
   push:
     branches: [main]
 
+# pinned by hand. an unpinned clone makes two builds of the same tree
+# incomparable, which is how a deployment mistake got misread for days as the
+# base having moved underneath us.
+env:
+  WINECX_COMMIT: aa5ddd8eae4d785a95a6199f17e9deed6625f07f
+
 jobs:
   build:
     runs-on: macos-15
@@ -24,7 +30,10 @@ jobs:
             extra-platforms = x86_64-darwin
 
       - name: clone winecx
-        run: git clone --depth 1 https://github.com/PhoenicisOrg/winecx.git winecx
+        run: |
+          git clone https://github.com/PhoenicisOrg/winecx.git winecx
+          git -C winecx checkout --detach "$WINECX_COMMIT"
+          git -C winecx --no-pager log -1 --oneline
 
       - name: apply patches
         run: |
@@ -160,6 +169,12 @@ jobs:
             local rel
             rel=$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[1], os.path.dirname(sys.argv[2])))" "$LIBDIR" "$f")
             chmod u+w "$f" 2>/dev/null || true
+            # the id, not only the dependencies: a dylib that still calls itself
+            # /nix/store/... cannot be dlopened off the builder, which silently
+            # cost us fonts, vulkan and tls in every build up to rt7
+            case "$f" in
+              *.dylib) install_name_tool -id "@loader_path/$(basename "$f")" "$f" 2>/dev/null || true ;;
+            esac
             for ref in $(scan "$f"); do
               if [[ "$(basename "$ref")" == libiconv*.dylib && "$(basename "$f")" == libintl* ]]; then
                 install_name_tool -change "$ref" "/usr/lib/libiconv.2.dylib" "$f" 2>/dev/null || true
@@ -172,6 +187,9 @@ jobs:
           for f in "$LIBDIR"/*.dylib; do fixup "$f"; done
           find Libraries/Wine/bin -type f | while read -r f; do fixup "$f"; done
           find Libraries/Wine/lib/wine -name "*.so" | while read -r f; do fixup "$f"; done
+
+          # the reference runtime ships both names; match it
+          ln -sf libfreetype.6.dylib "$LIBDIR/libfreetype.dylib"
 
           cat > Libraries/WhiskyWineVersion.plist <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -192,6 +210,32 @@ jobs:
           </dict>
           </plist>
           PLIST
+      - name: verify the tree is relocatable
+        run: |
+          # every build up to rt7 shipped dylibs whose own id was a /nix/store
+          # path that exists only on the runner, so they could not be dlopened
+          # anywhere else and the runtime silently lost fonts, vulkan and tls.
+          : > /tmp/badrefs
+          find Libraries -type f ! -type l -print0 | while IFS= read -r -d '' f; do
+            file -b "$f" | grep -q Mach-O || continue
+            # only absolute paths are a problem. @loader_path and bare names
+            # both relocate; the reference runtime uses bare names throughout.
+            otool -D "$f" 2>/dev/null | sed -n '2p' | grep -E '^/' \
+              | grep -vE '^(/usr/lib/|/System/)' \
+              | sed "s|^|id $f -> |" >> /tmp/badrefs
+            otool -L "$f" 2>/dev/null | tail -n +3 | awk '{print $1}' \
+              | grep -E '^/' | grep -vE '^(/usr/lib/|/System/)' \
+              | sed "s|^|dep $f -> |" >> /tmp/badrefs
+          done
+          if [ -s /tmp/badrefs ]; then
+            sed 's/^/::error::not relocatable: /' /tmp/badrefs
+            echo "$(wc -l < /tmp/badrefs) absolute reference(s); refusing to ship"
+            exit 1
+          fi
+          echo "relocatable: ok"
+
+      - name: package
+        run: |
           tar -czf Libraries.tar.gz Libraries
           shasum -a 256 Libraries.tar.gz | tee Libraries.tar.gz.sha256
 
