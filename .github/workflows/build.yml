@@ -118,11 +118,49 @@ jobs:
           cd build
           make -j"$(sysctl -n hw.ncpu)"
 
+      - name: bundle wine-mono and wine-gecko
+        run: |
+          # without these in the runtime's datadir, every new prefix stops on a
+          # modal "Wine could not find a wine-mono package" dialog and waits
+          # forever for a click. versions and hashes are the ones wine itself
+          # pins in dlls/appwiz.cpl/addons.c, so a mismatch means the tag moved.
+          set -eu
+          mono_ver=$(sed -n 's/^#define MONO_VERSION "\(.*\)"/\1/p' winecx/dlls/appwiz.cpl/addons.c)
+          gecko_ver=$(sed -n 's/^#define GECKO_VERSION "\(.*\)"/\1/p' winecx/dlls/appwiz.cpl/addons.c)
+          echo "mono $mono_ver, gecko $gecko_ver"
+
+          fetch() {
+            curl -fsSL -o "$2" "$1"
+            got=$(shasum -a 256 "$2" | cut -d' ' -f1)
+            [ "$got" = "$3" ] || { echo "hash mismatch for $2: $got != $3"; exit 1; }
+          }
+
+          # GECKO_SHA is defined once per arch inside an #ifdef chain, i386 first
+          # then x86_64; MONO_SHA covers both.
+          gecko_sha_x86=$(sed -n 's/^#define GECKO_SHA "\(.*\)"/\1/p' winecx/dlls/appwiz.cpl/addons.c | sed -n 1p)
+          gecko_sha_x64=$(sed -n 's/^#define GECKO_SHA "\(.*\)"/\1/p' winecx/dlls/appwiz.cpl/addons.c | sed -n 2p)
+          mono_sha=$(sed -n 's/^#define MONO_SHA "\(.*\)"/\1/p' winecx/dlls/appwiz.cpl/addons.c | sed -n 1p)
+
+          for v in "$mono_ver" "$gecko_ver" "$mono_sha" "$gecko_sha_x86" "$gecko_sha_x64"; do
+            [ -n "$v" ] || { echo "could not read addon versions/hashes from addons.c"; exit 1; }
+          done
+          mkdir -p addons
+          fetch "https://dl.winehq.org/wine/wine-mono/$mono_ver/wine-mono-$mono_ver-x86.msi" \
+                "addons/wine-mono-$mono_ver-x86.msi" "$mono_sha"
+          fetch "https://dl.winehq.org/wine/wine-gecko/$gecko_ver/wine-gecko-$gecko_ver-x86.msi" \
+                "addons/wine-gecko-$gecko_ver-x86.msi" "$gecko_sha_x86"
+          fetch "https://dl.winehq.org/wine/wine-gecko/$gecko_ver/wine-gecko-$gecko_ver-x86_64.msi" \
+                "addons/wine-gecko-$gecko_ver-x86_64.msi" "$gecko_sha_x64"
+          ls -lh addons
+
       - name: install and package
         run: |
           export PATH="$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
           cd build
           make install DESTDIR="$PWD/../staging"
+          mkdir -p "$PWD/../staging/opt/whiskywine/share/wine/mono" "$PWD/../staging/opt/whiskywine/share/wine/gecko"
+          cp "$PWD/../addons"/wine-mono-*.msi "$PWD/../staging/opt/whiskywine/share/wine/mono/"
+          cp "$PWD/../addons"/wine-gecko-*.msi "$PWD/../staging/opt/whiskywine/share/wine/gecko/"
           cd ..
           mkdir -p Libraries/Wine
           cp -R staging/opt/whiskywine/bin Libraries/Wine/bin
