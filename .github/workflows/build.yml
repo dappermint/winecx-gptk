@@ -234,6 +234,12 @@ jobs:
           fi
           echo "relocatable: ok"
 
+          # a 64-bit-only tree cannot load syswow64\ntdll.dll, so every 32-bit
+          # program dies with c0000135. one build shipped with this empty.
+          i386=$(ls Libraries/Wine/lib/wine/i386-windows 2>/dev/null | wc -l | tr -d ' ')
+          [ "$i386" -gt 500 ] || { echo "::error::i386-windows has $i386 files"; exit 1; }
+          echo "i386 PE half: $i386 files"
+
       - name: package
         run: |
           tar -czf Libraries.tar.gz Libraries
