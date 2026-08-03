@@ -324,6 +324,36 @@ jobs:
           done
           echo "addons: ok"
 
+      - name: verify the runtime can open a window
+        run: |
+          # the three gates above inspect the tree; none of them runs anything,
+          # which is how a build that could not create a single top-level window
+          # passed all of them. the display driver failing to init is invisible
+          # short of asking for a window: wine falls back to nodrv, keeps going,
+          # and only CreateWindowEx tells you, with ERROR_INVALID_WINDOW_HANDLE.
+          export PATH="$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
+          x86_64-w64-mingw32-clang -O2 -o winmsg.exe tests/winmsg.c -luser32
+
+          export WINEPREFIX="$PWD/smoke-prefix"
+          export DYLD_FALLBACK_LIBRARY_PATH="$PWD/Libraries/Wine/lib"
+          export WINEDLLOVERRIDES="mscoree=d;mshtml=d"
+          WINEDEBUG=-all ./Libraries/Wine/bin/wine64 wineboot -u >/dev/null 2>&1 || true
+
+          WINEDEBUG=+winediag ./Libraries/Wine/bin/wine64 winmsg.exe > smoke.log 2>&1 || true
+          grep -E '^\[|^RESULT|^FAIL' smoke.log | tee -a "$GITHUB_STEP_SUMMARY"
+
+          if grep -q "nodrv_CreateWindow" smoke.log; then
+            echo "::error::the display driver did not load; the runtime fell back to nodrv"
+            sed -n 's/^.*winediag:/  /p' smoke.log | head -5
+            exit 1
+          fi
+          grep -q "RESULT: windows ok" smoke.log || {
+            echo "::error::the runtime cannot create a window"
+            tail -20 smoke.log
+            exit 1
+          }
+          echo "windows: ok"
+
       - name: package
         run: |
           tar -czf Libraries.tar.gz Libraries
