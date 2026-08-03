@@ -121,16 +121,23 @@ jobs:
           cd build
           make -j"$(sysctl -n hw.ncpu)"
 
-      - name: bundle wine-mono and wine-gecko
+      - name: unpack wine-mono and wine-gecko
         run: |
-          # without these in the runtime's datadir, every new prefix stops on a
-          # modal "Wine could not find a wine-mono package" dialog and waits
-          # forever for a click. versions and hashes are the ones wine itself
-          # pins in dlls/appwiz.cpl/addons.c, so a mismatch means the tag moved.
+          # the extracted form, which is what the stock whisky engine ships and
+          # what mscoree and mshtml load straight out of the datadir. the .msi
+          # form works too but appwiz then installs a copy into every prefix,
+          # costing ~180MB per bottle. versions come from winecx's own
+          # dlls/appwiz.cpl/addons.c, which is what the loaders look for:
+          # metahost.c wants wine-mono-$MONO_VERSION, nsembed.c wants
+          # wine-gecko-$GECKO_VERSION-$arch. addons.c only carries .msi hashes,
+          # so the tarball hashes are pinned here instead.
           set -eu
           mono_ver=$(sed -n 's/^#define MONO_VERSION "\(.*\)"/\1/p' winecx/dlls/appwiz.cpl/addons.c)
           gecko_ver=$(sed -n 's/^#define GECKO_VERSION "\(.*\)"/\1/p' winecx/dlls/appwiz.cpl/addons.c)
-          echo "mono $mono_ver, gecko $gecko_ver"
+          [ "$mono_ver" = "9.4.0" ] && [ "$gecko_ver" = "2.47.4" ] || {
+            echo "winecx now wants mono $mono_ver, gecko $gecko_ver; update the pinned hashes"
+            exit 1
+          }
 
           fetch() {
             curl -fsSL -o "$2" "$1"
@@ -138,23 +145,20 @@ jobs:
             [ "$got" = "$3" ] || { echo "hash mismatch for $2: $got != $3"; exit 1; }
           }
 
-          # GECKO_SHA is defined once per arch inside an #ifdef chain, i386 first
-          # then x86_64; MONO_SHA covers both.
-          gecko_sha_x86=$(sed -n 's/^#define GECKO_SHA "\(.*\)"/\1/p' winecx/dlls/appwiz.cpl/addons.c | sed -n 1p)
-          gecko_sha_x64=$(sed -n 's/^#define GECKO_SHA "\(.*\)"/\1/p' winecx/dlls/appwiz.cpl/addons.c | sed -n 2p)
-          mono_sha=$(sed -n 's/^#define MONO_SHA "\(.*\)"/\1/p' winecx/dlls/appwiz.cpl/addons.c | sed -n 1p)
+          mkdir -p addons/mono addons/gecko
+          fetch "https://dl.winehq.org/wine/wine-mono/$mono_ver/wine-mono-$mono_ver-x86.tar.xz" \
+                mono.tar.xz fd772219aacf46b825fa891a647af4a9ddf8439320101c231918b2037bf13858
+          fetch "https://dl.winehq.org/wine/wine-gecko/$gecko_ver/wine-gecko-$gecko_ver-x86.tar.xz" \
+                gecko-x86.tar.xz 2cfc8d5c948602e21eff8a78613e1826f2d033df9672cace87fed56e8310afb6
+          fetch "https://dl.winehq.org/wine/wine-gecko/$gecko_ver/wine-gecko-$gecko_ver-x86_64.tar.xz" \
+                gecko-x64.tar.xz fd88fc7e537d058d7a8abf0c1ebc90c574892a466de86706a26d254710a82814
 
-          for v in "$mono_ver" "$gecko_ver" "$mono_sha" "$gecko_sha_x86" "$gecko_sha_x64"; do
-            [ -n "$v" ] || { echo "could not read addon versions/hashes from addons.c"; exit 1; }
-          done
-          mkdir -p addons
-          fetch "https://dl.winehq.org/wine/wine-mono/$mono_ver/wine-mono-$mono_ver-x86.msi" \
-                "addons/wine-mono-$mono_ver-x86.msi" "$mono_sha"
-          fetch "https://dl.winehq.org/wine/wine-gecko/$gecko_ver/wine-gecko-$gecko_ver-x86.msi" \
-                "addons/wine-gecko-$gecko_ver-x86.msi" "$gecko_sha_x86"
-          fetch "https://dl.winehq.org/wine/wine-gecko/$gecko_ver/wine-gecko-$gecko_ver-x86_64.msi" \
-                "addons/wine-gecko-$gecko_ver-x86_64.msi" "$gecko_sha_x64"
-          ls -lh addons
+          tar -xJf mono.tar.xz -C addons/mono
+          tar -xJf gecko-x86.tar.xz -C addons/gecko
+          tar -xJf gecko-x64.tar.xz -C addons/gecko
+          [ -d "addons/mono/wine-mono-$mono_ver" ] || { echo "mono tarball layout changed"; exit 1; }
+          [ -d "addons/gecko/wine-gecko-$gecko_ver-x86_64" ] || { echo "gecko tarball layout changed"; exit 1; }
+          du -sh addons/mono addons/gecko
 
       - name: install and package
         run: |
@@ -162,8 +166,8 @@ jobs:
           cd build
           make install DESTDIR="$PWD/../staging"
           mkdir -p "$PWD/../staging/opt/whiskywine/share/wine/mono" "$PWD/../staging/opt/whiskywine/share/wine/gecko"
-          cp "$PWD/../addons"/wine-mono-*.msi "$PWD/../staging/opt/whiskywine/share/wine/mono/"
-          cp "$PWD/../addons"/wine-gecko-*.msi "$PWD/../staging/opt/whiskywine/share/wine/gecko/"
+          cp -R "$PWD/../addons/mono"/* "$PWD/../staging/opt/whiskywine/share/wine/mono/"
+          cp -R "$PWD/../addons/gecko"/* "$PWD/../staging/opt/whiskywine/share/wine/gecko/"
           cd ..
           mkdir -p Libraries/Wine
           cp -R staging/opt/whiskywine/bin Libraries/Wine/bin
