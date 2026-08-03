@@ -8,8 +8,28 @@ what the workflow does:
 
 - clones winecx, builds the unix half for x86_64 under rosetta on a macos-15 runner
 - PE half via llvm-mingw, `--enable-archs=i386,x86_64` (new wow64, 32-bit steam.exe works without crossover's 32on64 toolchain)
-- first cut is minimal: no vulkan (no dxvk), no gstreamer, freetype + gnutls from x86_64 homebrew
+- no gstreamer; freetype, gnutls and moltenvk come from nixpkgs x86_64-darwin and are bundled flat into `Wine/lib` with `@loader_path` rewrites, so the tree relocates
+- wine-mono and wine-gecko go in extracted, the same form and the same place the stock whisky engine puts them
 - packages a whisky `Libraries.tar.gz` with `gptkCapable` set in the version plist
+
+three gates refuse to ship a bad tree, each one added after that exact thing shipped silently:
+
+- **relocatability.** every Mach-O file is swept for absolute non-system references. a dylib whose own id is a `/nix/store` path cannot be dlopened off the builder, which cost fonts, vulkan and tls for seven builds without a single error message.
+- **the i386 half is non-empty.** a 64-bit-only tree cannot load `syswow64\ntdll.dll`, so every 32-bit program dies with `c0000135`.
+- **the PE half is stripped.** llvm-mingw emits DWARF and nothing removes it, which doubles the download and is invisible: `ntdll.dll` is 3.0MB unstripped against the stock engine's 0.7MB, and everything still runs.
+
+## reproducibility
+
+everything the build consumes is pinned in-tree, no secrets, no caches, no self-hosted runners:
+
+| input | pinned by |
+|---|---|
+| winecx sources | `WINECX_COMMIT` in the workflow env |
+| nixpkgs | `NIXPKGS_REV` in the workflow env, a rev not a branch |
+| llvm-mingw | dated release tag in the download url |
+| wine-mono, wine-gecko | sha256 in the workflow, checked after download; the versions are read out of winecx's `dlls/appwiz.cpl/addons.c` and the build stops if they move |
+
+the actions used are `actions/checkout`, `actions/upload-artifact` and `DeterminateSystems/nix-installer-action`. that last one is third party; pin it to a commit sha if you want the supply chain fully nailed down.
 
 ## patches
 
