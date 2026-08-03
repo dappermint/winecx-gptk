@@ -7,9 +7,12 @@ on:
 
 # pinned by hand. an unpinned clone makes two builds of the same tree
 # incomparable, which is how a deployment mistake got misread for days as the
-# base having moved underneath us.
+# base having moved underneath us. the nixpkgs rev is a branch tip captured on
+# 2026-08-03, for the same reason: a branch ref moves, so the runtime's
+# freetype, gnutls and moltenvk would change without a commit here saying so.
 env:
   WINECX_COMMIT: aa5ddd8eae4d785a95a6199f17e9deed6625f07f
+  NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
 
 jobs:
   build:
@@ -51,7 +54,7 @@ jobs:
 
       - name: nix toolchain and x86_64 libs
         run: |
-          NIXPKGS="github:NixOS/nixpkgs/nixos-25.05"
+          NIXPKGS="github:NixOS/nixpkgs/$NIXPKGS_REV"
           tools=$(nix build --no-link --print-out-paths \
             "$NIXPKGS#bison" "$NIXPKGS#flex" "$NIXPKGS#pkg-config")
           toolpath=""
