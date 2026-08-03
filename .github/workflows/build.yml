@@ -173,6 +173,18 @@ jobs:
           cp -R staging/opt/whiskywine/bin Libraries/Wine/bin
           cp -R staging/opt/whiskywine/lib Libraries/Wine/lib
           cp -R staging/opt/whiskywine/share Libraries/Wine/share
+
+          # llvm-mingw builds the PE half with DWARF and nothing strips it, so
+          # ntdll.dll ships at 3.0MB against the stock engine's 0.7MB. and the
+          # .a import libraries are link-time only; the stock engine ships none.
+          # together they are ~600MB of the tree.
+          command -v llvm-strip >/dev/null || { echo "::error::llvm-strip not on PATH"; exit 1; }
+          find Libraries/Wine/lib/wine/*-windows -name '*.a' -delete
+          # one file at a time: a few entries are not COFF (.tlb, .nls) and a
+          # batched invocation would abandon the rest of its batch on the first
+          # of them. the size gate below is what actually decides
+          find Libraries/Wine/lib/wine/*-windows -type f -print0 \
+            | while IFS= read -r -d '' f; do llvm-strip --strip-debug "$f" 2>/dev/null || true; done
           # CW HACK 22144: on apple without a preloader the loader expects its
           # own binary to be named wineloader; whisky expects wine64
           cp Libraries/Wine/bin/wine Libraries/Wine/bin/wineloader
@@ -294,10 +306,31 @@ jobs:
           [ "$i386" -gt 500 ] || { echo "::error::i386-windows has $i386 files"; exit 1; }
           echo "i386 PE half: $i386 files"
 
+          # an unstripped PE half is ~600MB of DWARF nobody can use, and it is
+          # silent: everything still runs, the download is just twice the size.
+          # ntdll is 0.7MB stripped in the stock engine and 3.0MB unstripped here
+          ntdll=$(stat -f%z Libraries/Wine/lib/wine/x86_64-windows/ntdll.dll)
+          [ "$ntdll" -lt 1500000 ] || {
+            echo "::error::ntdll.dll is $ntdll bytes, the PE half did not get stripped"
+            exit 1
+          }
+
+          # the extracted addons the stock engine also ships. without them a new
+          # prefix stops on a modal wine-mono dialog and waits for a click
+          for d in share/wine/mono/wine-mono-9.4.0 \
+                   share/wine/gecko/wine-gecko-2.47.4-x86 \
+                   share/wine/gecko/wine-gecko-2.47.4-x86_64; do
+            [ -d "Libraries/Wine/$d" ] || { echo "::error::missing $d"; exit 1; }
+          done
+          echo "addons: ok"
+
       - name: package
         run: |
           tar -czf Libraries.tar.gz Libraries
           shasum -a 256 Libraries.tar.gz | tee Libraries.tar.gz.sha256
+          # the stock whisky engine v3.1.1 tarball is 332,438,526 bytes and
+          # carries the same addons, so this is the number to compare against
+          echo "tarball bytes: $(stat -f%z Libraries.tar.gz)" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: upload runtime
         uses: actions/upload-artifact@v4
