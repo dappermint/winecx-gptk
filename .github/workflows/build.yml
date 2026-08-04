@@ -26,6 +26,36 @@ jobs:
           /usr/sbin/softwareupdate --install-rosetta --agree-to-license || true
           arch -x86_64 /usr/bin/true && echo "rosetta ok"
 
+      # compilation cache: harness-only changes rebuild in minutes instead of
+      # ~50. compilercheck=content so cache survives runner image updates
+      # (mtime-based checks would invalidate everything on each image bump).
+      # for a provenance-clean release build, wipe the cache from the actions
+      # UI (or bump the key) and re-run; a cold cache is a full clean build.
+      - name: ccache
+        run: |
+          brew install -q ccache
+          {
+            echo "CCACHE_DIR=$HOME/.ccache"
+            echo "CCACHE_MAXSIZE=2G"
+            echo "CCACHE_COMPILERCHECK=content"
+          } >> "$GITHUB_ENV"
+          # wrappers so the PE half's cross compilers go through ccache too;
+          # llvm-mingw lands at $PWD/llvm-mingw two steps later
+          mkdir -p ccache-bin
+          for t in x86_64-w64-mingw32-clang i686-w64-mingw32-clang; do
+            printf '#!/bin/sh\nexec ccache "%s/llvm-mingw/bin/%s" "$@"\n' "$PWD" "$t" > "ccache-bin/$t"
+            chmod +x "ccache-bin/$t"
+          done
+
+      - name: restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ env.WINECX_COMMIT }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ env.WINECX_COMMIT }}-
+            ccache-
+
       - name: install nix
         uses: DeterminateSystems/nix-installer-action@v14
         with:
@@ -88,10 +118,10 @@ jobs:
 
       - name: configure
         run: |
-          export PATH="$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
+          export PATH="$PWD/ccache-bin:$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
           export SDKROOT="$(/usr/bin/xcrun --show-sdk-path)"
-          export CC="/usr/bin/clang -arch x86_64"
-          export CXX="/usr/bin/clang++ -arch x86_64"
+          export CC="ccache /usr/bin/clang -arch x86_64"
+          export CXX="ccache /usr/bin/clang++ -arch x86_64"
           export PKG_CONFIG_PATH="$NIX_PKG_CONFIG_PATH"
           export CFLAGS="-O2 -Wno-error=implicit-function-declaration $NIX_INCS"
           export LDFLAGS="$NIX_LDFS"
@@ -117,9 +147,10 @@ jobs:
 
       - name: make
         run: |
-          export PATH="$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
+          export PATH="$PWD/ccache-bin:$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
           cd build
           make -j"$(sysctl -n hw.ncpu)"
+          ccache -s
 
       - name: unpack wine-mono and wine-gecko
         run: |
