@@ -1,0 +1,110 @@
+winemac: publish d3dmetal's metal layer, and size the views it renders into
+
+With 0013 and 0016 the bridge was complete and steam's window was still
+black. Three things were wrong, all measured on the webhelper:
+
+1. The remote view is never added to a window, so AppKit never realises
+   its layer tree: newMetalViewWithDevice's addSubview: never becomes a
+   sublayer, self.layer.sublayers stays empty (measured: subs=0), and the
+   CAContext published an empty tree. D3DMetal draws straight into the
+   metal layer, so publish that layer instead of the view's own.
+
+2. The window can still be unsized when d3dmetal first asks for its data,
+   and 0013 accepted the empty rect, so the view and its metal layer were
+   created 0x0 and the drawable had no area. Fall back to the top level's
+   client rect, which is sized well before this point.
+
+3. On the receiving side the cached macdrv rects are empty for a child
+   window the driver never draws, and chromium's gpu process renders into
+   exactly such a window. Take the real rect from user32, and host on the
+   window's content view when the child chain is still zero-sized.
+
+With all three, steam's UI renders.
+
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ -755,10 +755,21 @@
+         [host setContextId:contextId];
+         host.magnificationFilter = kCAFilterNearest;
+         host.contentsScale = retina_on ? 2.0 : 1.0;
+-        host.frame = self.layer.bounds;
++
++        /* the child view chain chromium renders into can still be zero-sized
++           when the layer arrives, so fall back to the window's content view,
++           which is always the real window size */
++        CALayer* parentLayer = self.layer;
++        CGRect hostFrame = self.layer.bounds;
++        if (CGRectIsEmpty(hostFrame) && self.window.contentView.layer)
++        {
++            parentLayer = self.window.contentView.layer;
++            hostFrame = parentLayer.bounds;
++        }
++        host.frame = hostFrame;
+         host.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
+ 
+-        [self.layer addSublayer:host];
++        [parentLayer addSublayer:host];
+         [_caLayerHosts setObject:host forKey:@(contextId)];
+ 
+         [(WineWindow*)self.window windowDidDrawContent];
+@@ -1095,7 +1106,11 @@
+ 
+     _remoteContext = [[CAContext contextWithCGSConnection:CGSMainConnectionID()
+                                                options:[NSDictionary dictionary]] retain];
+-    [_remoteContext setLayer:self.layer];
++    /* this view is never added to a window, so appkit never realises its
++       layer tree and the metal view's layer never becomes a sublayer of
++       ours: publishing self.layer would publish an empty tree. d3dmetal
++       draws straight into the metal layer, so publish that instead */
++    [_remoteContext setLayer:(_metalView ? _metalView.layer : self.layer)];
+     _contextId = [_remoteContext contextId];
+     if (!_contextId)
+     {
+--- a/dlls/winemac.drv/window.c
++++ b/dlls/winemac.drv/window.c
+@@ -1768,7 +1768,22 @@
+         {
+             TRACE("WM_MACDRV_CREATE_REMOTE_LAYER context_id %u\n", (unsigned int)lp);
+             if (!data->client_cocoa_view) create_client_cocoa_view(data);
+-            if (data->client_cocoa_view) macdrv_view_create_ca_layer_host(data->client_cocoa_view, (unsigned int)lp);
++            if (data->client_cocoa_view)
++            {
++                RECT client;
++
++                /* the cached rects are empty for a child window the mac driver
++                   never draws, and chromium's gpu process renders into exactly
++                   such a window. hosting on a zero-sized view composites
++                   nothing, so take the real rect from user32 instead */
++                if (NtUserGetClientRect(hwnd, &client, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI)) &&
++                    !IsRectEmpty(&client))
++                {
++                    OffsetRect(&client, -client.left, -client.top);
++                    macdrv_set_view_frame(data->client_cocoa_view, cgrect_from_rect(client));
++                }
++                macdrv_view_create_ca_layer_host(data->client_cocoa_view, (unsigned int)lp);
++            }
+             release_win_data(data);
+         }
+         return 0;
+--- a/dlls/winemac.drv/d3dmetal.c
++++ b/dlls/winemac.drv/d3dmetal.c
+@@ -113,6 +113,19 @@
+             return NULL;
+         }
+ 
++        /* the window can still be unsized when d3dmetal first asks for it, and
++           a zero-sized view gives the metal layer a zero drawable, so nothing
++           is ever rendered. the top level is sized well before this point */
++        if (IsRectEmpty(&client_rect))
++        {
++            HWND root = NtUserGetAncestor(hwnd, GA_ROOT);
++            RECT root_rect;
++
++            if (root && NtUserGetClientRect(root, &root_rect, NtUserGetWinMonitorDpi(root, MDT_RAW_DPI)) &&
++                !IsRectEmpty(&root_rect))
++                client_rect = root_rect;
++        }
++
+         if (!(d3dm_data = calloc(1, sizeof(*d3dm_data)))) return NULL;
+         d3dm_data->hwnd = hwnd;
+         d3dm_data->client_rect = client_rect;
