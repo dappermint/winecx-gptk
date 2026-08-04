@@ -1,0 +1,81 @@
+winemac: post the remote layer from the wine thread, not the cocoa one
+
+macdrv_create_remote_layer posts WM_MACDRV_CREATE_REMOTE_LAYER through
+NtUserPostMessage, which is a win32u call and needs a wine thread context.
+0013 called it from inside publishRemoteLayer, which runs in an
+OnMainThread block on the cocoa main thread, where that context does not
+exist. The post never took effect and nothing after the CAContext
+creation ran.
+
+Measured on steam's webhelper, before and after, same runtime and bottle:
+
+              before   after
+  SEND enter      0       1
+  SEND posted     -       ok=1
+  RECV message    0       1
+  CALayerHost     0       1
+
+So the whole cross-process bridge was dead: the gpu process published a
+valid CAContext every time and the owning process never heard about it.
+
+publishRemoteLayer becomes prepare-only and exposes the hwnd and context
+id; macdrv_publish_d3dmetal_remote_view does the post after OnMainThread
+returns, back on the calling wine thread.
+
+The window is still black after this, for a different and now visible
+reason: the hosted layer arrives sized 0x0 because the client view the
+receive side creates on demand is never given the client rect.
+
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ -430,6 +430,8 @@
+ - (instancetype) initWithHwnd:(void*)hwnd frame:(NSRect)frame;
+ - (BOOL) publishRemoteLayer;
+ - (void) unpublishRemoteLayer;
++- (void*) remoteHwnd;
++- (CAContextID) remoteContextId;
+ 
+ @end
+ 
+@@ -1103,9 +1105,13 @@
+         return NO;
+     }
+ 
+-    macdrv_create_remote_layer(_hwnd, _contextId);
++    /* the post is a win32u call and must run on the wine thread, not here on
++       the cocoa main thread; the caller does it after this returns */
+     return YES;
+ }
++
++- (void*) remoteHwnd { return _hwnd; }
++- (CAContextID) remoteContextId { return _contextId; }
+ 
+ - (void) unpublishRemoteLayer
+ {
+@@ -4164,11 +4170,24 @@
+     WineContentView* view = (WineContentView*)v;
+     __block BOOL remote = NO;
+ 
++    __block void* hwnd = NULL;
++    __block CAContextID contextId = 0;
++
+     OnMainThread(^{
+-        if ([view isKindOfClass:[WineD3DMetalRemoteView class]])
+-            remote = [(WineD3DMetalRemoteView*)view publishRemoteLayer];
++        if ([view isKindOfClass:[WineD3DMetalRemoteView class]] &&
++            [(WineD3DMetalRemoteView*)view publishRemoteLayer])
++        {
++            remote = YES;
++            hwnd = [(WineD3DMetalRemoteView*)view remoteHwnd];
++            contextId = [(WineD3DMetalRemoteView*)view remoteContextId];
++        }
+     });
+ 
++    /* posted here, on the calling wine thread, so NtUserPostMessage has a
++       real thread context and actually reaches the owning process */
++    if (remote && hwnd && contextId)
++        macdrv_create_remote_layer(hwnd, contextId);
++
+     return remote;
+ }
+ }
