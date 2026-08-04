@@ -3,10 +3,11 @@ name: build winecx gptk runtime
 on:
   workflow_dispatch:
     inputs:
-      fast:
-        description: "iteration build: -O0 and no debug info, roughly half the compile time. do not publish the artifact"
-        type: boolean
-        default: false
+      opt:
+        description: "standard -O2, release -O3, fast -O0 for iteration only"
+        type: choice
+        default: standard
+        options: [standard, release, fast]
   push:
     branches: [main]
 
@@ -137,24 +138,32 @@ jobs:
 
       - name: configure
         env:
-          FAST_BUILD: ${{ inputs.fast }}
+          OPT_LEVEL: ${{ inputs.opt }}
         run: |
           export PATH="$PWD/ccache-bin:$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
           export SDKROOT="$(/usr/bin/xcrun --show-sdk-path)"
           export CC="ccache /usr/bin/clang -arch x86_64"
           export CXX="ccache /usr/bin/clang++ -arch x86_64"
           export PKG_CONFIG_PATH="$NIX_PKG_CONFIG_PATH"
-          # -O0 roughly halves clang's time. iteration builds only: the
-          # artifact is slower and is not what anyone should be shipping
-          if [ "$FAST_BUILD" = "true" ]; then
-            OPT="-O0 -g0"
-            echo "::warning::fast build, -O0 and no debug info; do not publish this artifact"
-          else
-            # -O3 for what we ship. configure already adds
-            # -fno-strict-aliasing, which is the flag wine actually depends on
-            # and the one that makes raising the level safe here
-            OPT="-O3"
-          fi
+          # -O2 unless asked otherwise: that is what wine itself ships and
+          # where a push build should stay. -O3 is opt-in for the runtimes we
+          # release; configure already adds -fno-strict-aliasing, the flag
+          # wine depends on, which is what makes raising it safe. -O0 roughly
+          # halves clang's time, for runs whose only job is to answer whether
+          # a patch works
+          case "$OPT_LEVEL" in
+            release)
+              OPT="-O3"
+              ;;
+            fast)
+              OPT="-O0 -g0"
+              echo "::warning::fast build, -O0 and no debug info; do not publish this artifact"
+              ;;
+            *)
+              OPT="-O2"
+              ;;
+          esac
+          echo "optimisation: $OPT" | tee -a "$GITHUB_STEP_SUMMARY"
           export CFLAGS="$OPT -Wno-error=implicit-function-declaration $NIX_INCS"
           export CROSSCFLAGS="$OPT"
           export LDFLAGS="$NIX_LDFS"
@@ -445,7 +454,7 @@ jobs:
         with:
           # a fast build says so in its own name, so an -O0 tree cannot be
           # mistaken for a release one three weeks from now
-          name: whiskywine-gptk-libraries${{ inputs.fast && '-fast-unoptimised' || '' }}
+          name: whiskywine-gptk-libraries${{ inputs.opt == 'fast' && '-fast-unoptimised' || '' }}
           path: |
             Libraries.tar.gz
             Libraries.tar.gz.sha256
