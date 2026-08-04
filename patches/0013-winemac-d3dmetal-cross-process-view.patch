@@ -1,0 +1,240 @@
+diff --git i/dlls/winemac.drv/cocoa_window.m w/dlls/winemac.drv/cocoa_window.m
+index 4934ea8..94a1d8c 100644
+--- i/dlls/winemac.drv/cocoa_window.m
++++ w/dlls/winemac.drv/cocoa_window.m
+@@ -420,6 +420,20 @@ - (void) removeCALayerHostView:(CAContextID)contextId;
+ @end
+ 
+ 
++@interface WineD3DMetalRemoteView : WineContentView
++{
++    void* _hwnd;
++    CAContext* _remoteContext;
++    CAContextID _contextId;
++}
++
++- (instancetype) initWithHwnd:(void*)hwnd frame:(NSRect)frame;
++- (BOOL) publishRemoteLayer;
++- (void) unpublishRemoteLayer;
++
++@end
++
++
+ @interface WineWindow ()
+ 
+ @property (readwrite, nonatomic) BOOL disabled;
+@@ -1064,6 +1078,55 @@ - (BOOL) isOpaque
+ @end
+ 
+ 
++@implementation WineD3DMetalRemoteView
++
++- (instancetype) initWithHwnd:(void*)hwnd frame:(NSRect)frame
++{
++    self = [super initWithFrame:frame];
++    if (self) _hwnd = hwnd;
++    return self;
++}
++
++- (BOOL) publishRemoteLayer
++{
++    if (_remoteContext) return YES;
++
++    _remoteContext = [[CAContext contextWithCGSConnection:CGSMainConnectionID()
++                                               options:[NSDictionary dictionary]] retain];
++    [_remoteContext setLayer:self.layer];
++    _contextId = [_remoteContext contextId];
++    if (!_contextId)
++    {
++        [_remoteContext setLayer:nil];
++        [_remoteContext release];
++        _remoteContext = nil;
++        return NO;
++    }
++
++    macdrv_create_remote_layer(_hwnd, _contextId);
++    return YES;
++}
++
++- (void) unpublishRemoteLayer
++{
++    if (!_remoteContext) return;
++
++    macdrv_release_remote_layer(_hwnd, _contextId);
++    [_remoteContext setLayer:nil];
++    [_remoteContext release];
++    _remoteContext = nil;
++    _contextId = 0;
++}
++
++- (void) dealloc
++{
++    [self unpublishRemoteLayer];
++    [super dealloc];
++}
++
++@end
++
++
+ @implementation WineWindow
+ 
+     static WineWindow* causing_becomeKeyWindow;
+@@ -4079,6 +4142,61 @@ void macdrv_view_release_metal_view(macdrv_metal_view v)
+     });
+ }
+ 
++macdrv_view macdrv_create_d3dmetal_remote_view(void* hwnd, CGRect rect)
++{
++@autoreleasepool
++{
++    __block WineD3DMetalRemoteView* view;
++
++    OnMainThread(^{
++        view = [[WineD3DMetalRemoteView alloc] initWithHwnd:hwnd
++                                                      frame:NSRectFromCGRect(cgrect_mac_from_win(rect))];
++    });
++
++    return (macdrv_view)view;
++}
++}
++
++int macdrv_publish_d3dmetal_remote_view(macdrv_view v)
++{
++@autoreleasepool
++{
++    WineContentView* view = (WineContentView*)v;
++    __block BOOL remote = NO;
++
++    OnMainThread(^{
++        if ([view isKindOfClass:[WineD3DMetalRemoteView class]])
++            remote = [(WineD3DMetalRemoteView*)view publishRemoteLayer];
++    });
++
++    return remote;
++}
++}
++
++int macdrv_release_d3dmetal_remote_view(macdrv_metal_view v)
++{
++@autoreleasepool
++{
++    WineMetalView* metal_view = (WineMetalView*)v;
++    __block BOOL remote = NO;
++
++    OnMainThread(^{
++        WineContentView* view = (WineContentView*)[metal_view superview];
++
++        if ([view isKindOfClass:[WineD3DMetalRemoteView class]])
++        {
++            remote = YES;
++            [(WineD3DMetalRemoteView*)view unpublishRemoteLayer];
++            [metal_view removeFromSuperview];
++            [metal_view release];
++            [view release];
++        }
++    });
++
++    return remote;
++}
++}
++
+ @protocol WineMetalSwapChain <NSObject>
+ 
+ - (CAMetalLayer*) layer;
+diff --git i/dlls/winemac.drv/d3dmetal.c w/dlls/winemac.drv/d3dmetal.c
+index 84085ac..f57edc2 100644
+--- i/dlls/winemac.drv/d3dmetal.c
++++ w/dlls/winemac.drv/d3dmetal.c
+@@ -101,13 +101,43 @@ static struct d3dmetal_macdrv_win_data *my_get_win_data(HWND hwnd)
+ {
+     struct macdrv_win_data *data;
+     struct d3dmetal_macdrv_win_data *d3dm_data;
++    RECT client_rect;
+     TRACE("get_win_data %p\n", hwnd);
+ 
+     data = get_win_data(hwnd);
+     if (!data)
+-        return NULL;
++    {
++        if (!NtUserGetClientRect(hwnd, &client_rect, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI)))
++        {
++            WARN("window %p is gone\n", hwnd);
++            return NULL;
++        }
+ 
+-    d3dm_data = calloc(1, sizeof(*d3dm_data));
++        if (!(d3dm_data = calloc(1, sizeof(*d3dm_data)))) return NULL;
++        d3dm_data->hwnd = hwnd;
++        d3dm_data->client_rect = client_rect;
++        d3dm_data->window_rect = client_rect;
++        d3dm_data->whole_rect = client_rect;
++        d3dm_data->on_screen = 1;
++        d3dm_data->client_cocoa_view = macdrv_create_d3dmetal_remote_view(hwnd,
++                                                                         cgrect_from_rect(client_rect));
++        d3dm_data->cocoa_view = d3dm_data->client_cocoa_view;
++        if (!d3dm_data->client_cocoa_view)
++        {
++            free(d3dm_data);
++            return NULL;
++        }
++
++        TRACE("created remote D3DMetal view %p for window %p\n",
++              d3dm_data->client_cocoa_view, hwnd);
++        return d3dm_data;
++    }
++
++    if (!(d3dm_data = calloc(1, sizeof(*d3dm_data))))
++    {
++        release_win_data(data);
++        return NULL;
++    }
+ 
+     d3dm_data->hwnd = data->hwnd;
+     d3dm_data->cocoa_window = data->cocoa_window;
+@@ -139,7 +169,7 @@ static void my_release_win_data(struct d3dmetal_macdrv_win_data *data)
+     if (!data)
+         return;
+ 
+-    release_win_data(data->padding[0]);
++    if (data->padding[0]) release_win_data(data->padding[0]);
+     free(data);
+ }
+ 
+@@ -163,8 +193,13 @@ static void my_macdrv_release_metal_device(macdrv_metal_device d)
+ 
+ static macdrv_metal_view my_macdrv_view_create_metal_view(macdrv_view v, macdrv_metal_device d)
+ {
++    macdrv_metal_view metal_view;
++
+     TRACE("macdrv_view_create_metal_view %p %p\n", v, d);
+-    return macdrv_view_create_metal_view(v, d);
++    metal_view = macdrv_view_create_metal_view(v, d);
++    if (metal_view && macdrv_publish_d3dmetal_remote_view(v))
++        TRACE("published remote D3DMetal view %p\n", metal_view);
++    return metal_view;
+ }
+ 
+ static macdrv_metal_layer my_macdrv_view_get_metal_layer(macdrv_metal_view v)
+@@ -176,7 +211,7 @@ static macdrv_metal_layer my_macdrv_view_get_metal_layer(macdrv_metal_view v)
+ static void my_macdrv_view_release_metal_view(macdrv_metal_view v)
+ {
+     TRACE("macdrv_view_release_metal_view %p\n", v);
+-    return macdrv_view_release_metal_view(v);
++    if (!macdrv_release_d3dmetal_remote_view(v)) macdrv_view_release_metal_view(v);
+ }
+ 
+ static void my_OnMainThread(dispatch_block_t b)
+diff --git i/dlls/winemac.drv/macdrv_cocoa.h w/dlls/winemac.drv/macdrv_cocoa.h
+index 9dbd783..973b0f7 100644
+--- i/dlls/winemac.drv/macdrv_cocoa.h
++++ w/dlls/winemac.drv/macdrv_cocoa.h
+@@ -593,6 +593,9 @@ extern void macdrv_order_cocoa_window(macdrv_window w, macdrv_window prev,
+ extern macdrv_metal_view macdrv_view_create_metal_view(macdrv_view v, macdrv_metal_device d);
+ extern macdrv_metal_layer macdrv_view_get_metal_layer(macdrv_metal_view v);
+ extern void macdrv_view_release_metal_view(macdrv_metal_view v);
++extern macdrv_view macdrv_create_d3dmetal_remote_view(void* hwnd, CGRect rect);
++extern int macdrv_publish_d3dmetal_remote_view(macdrv_view v);
++extern int macdrv_release_d3dmetal_remote_view(macdrv_metal_view v);
+ extern macdrv_metal_swapchain macdrv_create_view_swapchain(macdrv_view v);
+ extern macdrv_metal_swapchain macdrv_create_offscreen_swapchain(void* hwnd, CGRect container, CGRect frame);
+ extern void macdrv_swapchain_set_frame(macdrv_metal_swapchain swapchain, CGRect container, CGRect frame);
