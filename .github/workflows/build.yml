@@ -2,6 +2,11 @@ name: build winecx gptk runtime
 
 on:
   workflow_dispatch:
+    inputs:
+      fast:
+        description: "iteration build: -O0 and no debug info, roughly half the compile time. do not publish the artifact"
+        type: boolean
+        default: false
   push:
     branches: [main]
 
@@ -36,8 +41,22 @@ jobs:
           brew install -q ccache
           {
             echo "CCACHE_DIR=$HOME/.ccache"
-            echo "CCACHE_MAXSIZE=2G"
+            # two PE arches plus the unix half is ~10k objects; 2G evicted
+            echo "CCACHE_MAXSIZE=4G"
             echo "CCACHE_COMPILERCHECK=content"
+            # wine stamps __DATE__/__TIME__ into a few files, and every run
+            # gets a fresh checkout, so without these the hit rate collapses
+            # on exactly the files that never changed
+            echo "CCACHE_SLOPPINESS=time_macros,locale,include_file_mtime,include_file_ctime"
+            # keep absolute build paths out of the hash so a cache from a
+            # differently-named workspace still hits
+            echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+            echo "CCACHE_NOHASHDIR=1"
+            # apfs copy-on-write clones instead of byte copies on every hit.
+            # not hardlinks: the package step runs llvm-strip over the outputs
+            # in place, which through a hardlink would rewrite the cache
+            echo "CCACHE_FILECLONE=1"
+            echo "CCACHE_INODECACHE=1"
           } >> "$GITHUB_ENV"
           # wrappers so the PE half's cross compilers go through ccache too;
           # llvm-mingw lands at $PWD/llvm-mingw two steps later
@@ -117,13 +136,27 @@ jobs:
           cat store-outs.txt
 
       - name: configure
+        env:
+          FAST_BUILD: ${{ inputs.fast }}
         run: |
           export PATH="$PWD/ccache-bin:$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
           export SDKROOT="$(/usr/bin/xcrun --show-sdk-path)"
           export CC="ccache /usr/bin/clang -arch x86_64"
           export CXX="ccache /usr/bin/clang++ -arch x86_64"
           export PKG_CONFIG_PATH="$NIX_PKG_CONFIG_PATH"
-          export CFLAGS="-O2 -Wno-error=implicit-function-declaration $NIX_INCS"
+          # -O0 roughly halves clang's time. iteration builds only: the
+          # artifact is slower and is not what anyone should be shipping
+          if [ "$FAST_BUILD" = "true" ]; then
+            OPT="-O0 -g0"
+            echo "::warning::fast build, -O0 and no debug info; do not publish this artifact"
+          else
+            # -O3 for what we ship. configure already adds
+            # -fno-strict-aliasing, which is the flag wine actually depends on
+            # and the one that makes raising the level safe here
+            OPT="-O3"
+          fi
+          export CFLAGS="$OPT -Wno-error=implicit-function-declaration $NIX_INCS"
+          export CROSSCFLAGS="$OPT"
           export LDFLAGS="$NIX_LDFS"
           export ac_cv_lib_soname_freetype="libfreetype.6.dylib"
           export ac_cv_lib_soname_gnutls="libgnutls.30.dylib"
@@ -149,8 +182,19 @@ jobs:
         run: |
           export PATH="$PWD/ccache-bin:$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
           cd build
-          make -j"$(sysctl -n hw.ncpu)"
-          ccache -s
+          # the runner has few cores and much of the work is i/o bound behind
+          # winebuild, so oversubscribing by half keeps them fed
+          ncpu=$(sysctl -n hw.logicalcpu)
+          ccache -z >/dev/null
+          make -j"$(( ncpu + ncpu / 2 ))"
+          # per-run numbers, not lifetime ones: this is how we tell whether
+          # the restored cache actually did anything
+          {
+            echo "### ccache"
+            echo '```'
+            ccache -s
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: unpack wine-mono and wine-gecko
         run: |
@@ -214,8 +258,11 @@ jobs:
           # one file at a time: a few entries are not COFF (.tlb, .nls) and a
           # batched invocation would abandon the rest of its batch on the first
           # of them. the size gate below is what actually decides
+          # one file per invocation, but in parallel: -n 1 keeps a non-COFF
+          # entry from taking its neighbours down with it
           find Libraries/Wine/lib/wine/*-windows -type f -print0 \
-            | while IFS= read -r -d '' f; do llvm-strip --strip-debug "$f" 2>/dev/null || true; done
+            | xargs -0 -P "$(sysctl -n hw.logicalcpu)" -n 1 \
+                llvm-strip --strip-debug 2>/dev/null || true
           # CW HACK 22144: on apple without a preloader the loader expects its
           # own binary to be named wineloader; whisky expects wine64
           cp Libraries/Wine/bin/wine Libraries/Wine/bin/wineloader
@@ -396,7 +443,9 @@ jobs:
       - name: upload runtime
         uses: actions/upload-artifact@v4
         with:
-          name: whiskywine-gptk-libraries
+          # a fast build says so in its own name, so an -O0 tree cannot be
+          # mistaken for a release one three weeks from now
+          name: whiskywine-gptk-libraries${{ inputs.fast && '-fast-unoptimised' || '' }}
           path: |
             Libraries.tar.gz
             Libraries.tar.gz.sha256
