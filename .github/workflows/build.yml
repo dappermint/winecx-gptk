@@ -642,7 +642,9 @@ jobs:
           # an unstripped PE half is ~600MB of DWARF nobody can use, and it is
           # silent: everything still runs, the download is just twice the size.
           # ntdll is 0.7MB stripped in the stock engine and 3.0MB unstripped here
-          ntdll=$(stat -f%z Libraries/Wine/lib/wine/x86_64-windows/ntdll.dll)
+          # wc -c, not stat -f%z: the self-hosted runner puts nix coreutils
+          # ahead of /usr/bin, and GNU stat has no -f
+          ntdll=$(wc -c < Libraries/Wine/lib/wine/x86_64-windows/ntdll.dll | tr -d ' ')
           [ "$ntdll" -lt 1500000 ] || {
             echo "::error::ntdll.dll is $ntdll bytes, the PE half did not get stripped"
             exit 1
@@ -778,7 +780,7 @@ jobs:
           shasum -a 256 Libraries.tar.gz | tee Libraries.tar.gz.sha256
           # the stock whisky engine v3.1.1 tarball is 332,438,526 bytes and
           # carries the same addons, so this is the number to compare against
-          echo "tarball bytes: $(stat -f%z Libraries.tar.gz)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "tarball bytes: $(wc -c < Libraries.tar.gz | tr -d ' ')" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: upload runtime
         uses: actions/upload-artifact@v4
