@@ -8,6 +8,11 @@ on:
         type: choice
         default: standard
         options: [standard, release, fast]
+      runner:
+        description: "where to build: self-hosted is ~10x faster, hosted is the clean-room check"
+        type: choice
+        default: self-hosted
+        options: [self-hosted, hosted]
   push:
     branches: [main]
 
@@ -24,7 +29,7 @@ env:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner == 'hosted' && fromJSON('["macos-15"]') || fromJSON('["self-hosted","macOS","ARM64"]') }}
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +46,10 @@ jobs:
       # UI (or bump the key) and re-run; a cold cache is a full clean build.
       - name: ccache
         run: |
-          brew install -q ccache
+          # a self-hosted runner is a real machine, and this one is nix-darwin
+          # managed with brew cleanup=uninstall, which reaps imperative
+          # installs. use what is already there and only install if missing
+          command -v ccache >/dev/null || brew install -q ccache
           {
             echo "CCACHE_DIR=$HOME/.ccache"
             # two PE arches plus the unix half is ~10k objects; 2G evicted
@@ -73,7 +81,11 @@ jobs:
             ccache-${{ env.WINECX_COMMIT }}-
             ccache-
 
+      # the self-hosted runner is nix-darwin managed and already carries
+      # extra-platforms = x86_64-darwin; installing over it would clobber a
+      # real machine's daemon and store
       - name: install nix
+        if: inputs.runner == 'hosted'
         uses: DeterminateSystems/nix-installer-action@v14
         with:
           extra-conf: |
@@ -168,6 +180,41 @@ jobs:
           } >> "$GITHUB_ENV"
           cat store-outs.txt
 
+      # makedep, winebuild, wrc, widl and wmc get exec'd thousands of times per
+      # build. built x86_64 they are all rosetta processes, and macos 27.0's
+      # ecosystemanalyticsd queues an analysis per rosetta exec whose bird XPC
+      # lookup can never succeed from the system domain, requeueing forever --
+      # which takes the whole machine to load ~10 and only a reboot clears it.
+      # that is survivable on a throwaway hosted runner and not on this one.
+      # build them native and point the main configure at them; the only
+      # translated processes left per run are the smoke tests'.
+      #
+      # native freetype is needed because sfnt2fon links it, and the x86_64 nix
+      # libs from the step above are the wrong arch for this stage.
+      - name: native tools build
+        run: |
+          NIXPKGS="github:NixOS/nixpkgs/$NIXPKGS_REV"
+          outs=$(nix build --no-link --print-out-paths \
+            "$NIXPKGS#freetype.dev" "$NIXPKGS#freetype.out" \
+            "$NIXPKGS#libpng.dev" "$NIXPKGS#zlib.dev" \
+            "$NIXPKGS#brotli.dev" "$NIXPKGS#bzip2.dev")
+          pcp=""
+          for d in $outs; do
+            [ -d "$d/lib/pkgconfig" ] && pcp="$d/lib/pkgconfig:$pcp"
+          done
+          export PATH="$NIX_TOOL_PATH$PATH"
+          export SDKROOT="$(/usr/bin/xcrun --show-sdk-path)"
+          export CC="ccache /usr/bin/clang"
+          export PKG_CONFIG_PATH="$pcp"
+          mkdir build-tools && cd build-tools
+          ../winecx/configure \
+            --without-x --without-wayland --without-gstreamer \
+            --without-oss --without-alsa --without-pulse --without-sane \
+            --without-usb --without-v4l2 --without-pcap --without-capi \
+            --without-opencl --without-ffmpeg --without-cups \
+            --disable-tests
+          make -j"$(sysctl -n hw.ncpu)" __tooldeps__
+
       - name: configure
         env:
           OPT_LEVEL: ${{ inputs.opt }}
@@ -207,6 +254,7 @@ jobs:
           mkdir build && cd build
           ../winecx/configure \
             --host=x86_64-apple-darwin24 \
+            --with-wine-tools=../build-tools \
             --enable-archs=i386,x86_64 \
             --disable-tests \
             --without-x --without-wayland \
