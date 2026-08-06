@@ -132,7 +132,15 @@ jobs:
           # ffmpeg-headless, not ffmpeg: winedmo wants libavutil, libavformat
           # and libavcodec and nothing else, and the full build drags in SDL
           # and an x11 closure that would be bundled along with it
-          for p in freetype gnutls libpng zlib brotli bzip2 nettle libtasn1 libidn2 p11-kit libunistring gmp moltenvk vulkan-headers ffmpeg-headless; do
+          # glib and orc are pulled in by name because pkg-config resolves
+          # gstreamer-1.0.pc's Requires: through PKG_CONFIG_PATH and nothing
+          # here reads nixpkgs' propagated-build-inputs, so without them the
+          # gstreamer probe fails on a missing glib-2.0 and configure quietly
+          # drops winegstreamer
+          for p in freetype gnutls libpng zlib brotli bzip2 nettle libtasn1 libidn2 p11-kit libunistring gmp moltenvk vulkan-headers ffmpeg-headless \
+                   glib orc \
+                   gst_all_1.gstreamer gst_all_1.gst-plugins-base gst_all_1.gst-plugins-good \
+                   gst_all_1.gst-plugins-bad gst_all_1.gst-libav; do
             # ffmpeg splits its dylibs into a "lib" output that neither dev nor
             # out carries: without it configure finds the headers, fails the
             # link test, and quietly disables ffmpeg. missing outputs on the
@@ -201,7 +209,7 @@ jobs:
             --host=x86_64-apple-darwin24 \
             --enable-archs=i386,x86_64 \
             --disable-tests \
-            --without-x --without-wayland --without-gstreamer \
+            --without-x --without-wayland \
             --without-oss --without-alsa --without-pulse --without-sane \
             --without-usb --without-v4l2 --without-pcap --without-capi \
             --without-opencl --without-cups \
@@ -221,6 +229,16 @@ jobs:
             exit 1
           }
           echo "ffmpeg: found"
+
+          # same story for gstreamer, which is what wmvcore, the quartz
+          # DirectShow path and every mfplat decoder go through. configure
+          # disables winegstreamer with a notice and builds on happily.
+          grep -qE '^GSTREAMER_LIBS *= *.+' Makefile || {
+            echo "::error::winegstreamer is not in the build; gstreamer was not found"
+            grep -i 'gstreamer\|glib-2.0\|gst_pad_new' config.log | tail -30
+            exit 1
+          }
+          echo "gstreamer: found"
 
       - name: make
         run: |
@@ -398,13 +416,29 @@ jobs:
           # in) does appear, so seed from the tree itself rather than from a
           # hand-kept list -- that list is what silently dropped a dependency
           # every time the configure flags changed.
+          # gstreamer's plugins are dlopened out of a directory, not linked, so
+          # they have to be copied in before the closure walk runs -- their own
+          # dependencies (the codec libraries) are only reachable through them.
+          # patch 0018 points GStreamer here at run time.
+          mkdir -p "$LIBDIR/gstreamer-1.0"
+          for d in $(cat store-outs.txt); do
+            [ -d "$d/lib/gstreamer-1.0" ] || continue
+            for p in "$d/lib/gstreamer-1.0/"*.dylib; do
+              [ -f "$p" ] || continue
+              cp -L "$p" "$LIBDIR/gstreamer-1.0/$(basename "$p")"
+              chmod u+w "$LIBDIR/gstreamer-1.0/$(basename "$p")"
+            done
+          done
+          echo "gstreamer plugins: $(ls "$LIBDIR/gstreamer-1.0" | wc -l | tr -d ' ')"
+
           queue=""
           for d in $(cat store-outs.txt); do
             for so in libfreetype.6.dylib libgnutls.30.dylib libMoltenVK.dylib; do
               [ -f "$d/lib/$so" ] && queue="$queue $d/lib/$so"
             done
           done
-          for f in Libraries/Wine/lib/wine/*-unix/*.so Libraries/Wine/bin/wine; do
+          for f in Libraries/Wine/lib/wine/*-unix/*.so Libraries/Wine/bin/wine \
+                   "$LIBDIR"/gstreamer-1.0/*.dylib; do
             [ -f "$f" ] || continue
             queue="$queue $(scan "$f" | tr '\n' ' ')"
           done
@@ -449,6 +483,10 @@ jobs:
             codesign -f -s - "$f" 2>/dev/null || true
           }
           for f in "$LIBDIR"/*.dylib; do fixup "$f"; done
+          # the plugins sit one level down, so fixup's relpath resolves to ".."
+          for f in "$LIBDIR"/gstreamer-1.0/*.dylib; do
+            if [ -f "$f" ]; then fixup "$f"; fi
+          done
           find Libraries/Wine/bin -type f | while read -r f; do fixup "$f"; done
           find Libraries/Wine/lib/wine -name "*.so" | while read -r f; do fixup "$f"; done
 
@@ -597,7 +635,17 @@ jobs:
             echo "::error::winedmo.so has no ffmpeg; video decode would be dead"
             exit 1
           }
-          echo "media: ok"
+          otool -L Libraries/Wine/lib/wine/x86_64-unix/winegstreamer.so \
+            | grep -q 'libgstreamer-1.0' || {
+            echo "::error::no winegstreamer; wmvcore, quartz and the mfplat decoders would be dead"
+            exit 1
+          }
+          plugins=$(ls Libraries/Wine/lib/gstreamer-1.0 2>/dev/null | wc -l | tr -d ' ')
+          [ "$plugins" -gt 50 ] || {
+            echo "::error::only $plugins gstreamer plugins bundled"
+            exit 1
+          }
+          echo "media: ok, $plugins gstreamer plugins"
 
       - name: verify the runtime can open a window
         run: |
@@ -650,6 +698,21 @@ jobs:
             exit 1
           fi
           echo "d3d9: ok"
+
+          # and media foundation, which is the only way to tell whether the
+          # bundled gstreamer plugins were actually found: a wrong plugin path
+          # still starts, still answers MFStartup, and just has no decoders
+          x86_64-w64-mingw32-gcc -O2 -o mfprobe.exe tests/mfprobe.c \
+            -lmfplat -lmfuuid -lole32
+          WINEDLLOVERRIDES="mscoree=d;mshtml=d" WINEDEBUG=-all \
+            ./Libraries/Wine/bin/wine64 mfprobe.exe > mf.log 2>&1 || true
+          grep -E '^\[|^RESULT|^FAIL' mf.log | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -q "RESULT: media foundation has decoders" mf.log || {
+            echo "::error::media foundation has no h264 decoder; gstreamer found no plugins"
+            tail -20 mf.log
+            exit 1
+          }
+          echo "media foundation: ok"
 
       - name: package
         run: |
