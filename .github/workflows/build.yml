@@ -207,7 +207,13 @@ jobs:
           export CC="ccache /usr/bin/clang"
           export PKG_CONFIG_PATH="$pcp"
           mkdir build-tools && cd build-tools
+          # this configure runs natively, so without an explicit arch list wine
+          # defaults to aarch64 and stops on "PE cross-compilation is required
+          # for aarch64". only __tooldeps__ is ever built here, so the list only
+          # has to name archs a PE compiler exists for -- the same two the real
+          # build uses.
           ../winecx/configure \
+            --enable-archs=i386,x86_64 \
             --without-x --without-wayland --without-gstreamer \
             --without-oss --without-alsa --without-pulse --without-sane \
             --without-usb --without-v4l2 --without-pcap --without-capi \
