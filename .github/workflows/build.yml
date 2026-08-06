@@ -129,8 +129,15 @@ jobs:
           echo "NIX_TOOL_PATH=$toolpath" >> "$GITHUB_ENV"
 
           outs=""
-          for p in freetype gnutls libpng zlib brotli bzip2 nettle libtasn1 libidn2 p11-kit libunistring gmp moltenvk vulkan-headers; do
-            for o in dev out; do
+          # ffmpeg-headless, not ffmpeg: winedmo wants libavutil, libavformat
+          # and libavcodec and nothing else, and the full build drags in SDL
+          # and an x11 closure that would be bundled along with it
+          for p in freetype gnutls libpng zlib brotli bzip2 nettle libtasn1 libidn2 p11-kit libunistring gmp moltenvk vulkan-headers ffmpeg-headless; do
+            # ffmpeg splits its dylibs into a "lib" output that neither dev nor
+            # out carries: without it configure finds the headers, fails the
+            # link test, and quietly disables ffmpeg. missing outputs on the
+            # other packages are skipped by the guard below.
+            for o in dev out lib; do
               if path=$(nix build --no-link --print-out-paths \
                 "$NIXPKGS#legacyPackages.x86_64-darwin.$p.$o" 2>/dev/null); then
                 outs="$outs $path"
@@ -197,12 +204,23 @@ jobs:
             --without-x --without-wayland --without-gstreamer \
             --without-oss --without-alsa --without-pulse --without-sane \
             --without-usb --without-v4l2 --without-pcap --without-capi \
-            --without-opencl --without-ffmpeg --without-cups \
+            --without-opencl --without-cups \
             --prefix=/opt/whiskywine || {
               echo "==== core tests section ===="
               sed -n '100,500p' config.log
               exit 1
             }
+
+          # wine's configure only warns when an optional library is missing, so
+          # a broken pkg-config path ships a runtime with no video decode and
+          # says nothing. winedmo backs mfsrcsnk / mfmp4srcsnk / mfasfsrcsnk,
+          # which is how a game plays its intro before it lets you in.
+          grep -q '^#define HAVE_FFMPEG 1' include/config.h || {
+            echo "::error::ffmpeg was not found; winedmo would ship with no backend"
+            grep -i 'ffmpeg\|libav' config.log | tail -20
+            exit 1
+          }
+          echo "ffmpeg: found"
 
       - name: make
         run: |
@@ -359,11 +377,22 @@ jobs:
           LIBDIR="$PWD/Libraries/Wine/lib"
           scan() { otool -L "$1" 2>/dev/null | awk '/\/nix\/store/{print $1}'; }
 
+          # two kinds of dependency, and only one of them is discoverable.
+          # freetype, gnutls and MoltenVK are dlopened by soname so they never
+          # appear in a load command: they have to be named. everything the
+          # unix modules link against directly (ffmpeg, and whatever it drags
+          # in) does appear, so seed from the tree itself rather than from a
+          # hand-kept list -- that list is what silently dropped a dependency
+          # every time the configure flags changed.
           queue=""
           for d in $(cat store-outs.txt); do
             for so in libfreetype.6.dylib libgnutls.30.dylib libMoltenVK.dylib; do
               [ -f "$d/lib/$so" ] && queue="$queue $d/lib/$so"
             done
+          done
+          for f in Libraries/Wine/lib/wine/*-unix/*.so Libraries/Wine/bin/wine; do
+            [ -f "$f" ] || continue
+            queue="$queue $(scan "$f" | tr '\n' ' ')"
           done
           while [ -n "$queue" ]; do
             next=""
@@ -540,6 +569,15 @@ jobs:
             exit 1
           fi
           echo "graphics payloads: ok"
+
+          # and the media half: winedmo builds whether or not ffmpeg was there,
+          # it just does nothing without it
+          otool -L Libraries/Wine/lib/wine/x86_64-unix/winedmo.so \
+            | grep -q 'libavcodec' || {
+            echo "::error::winedmo.so has no ffmpeg; video decode would be dead"
+            exit 1
+          }
+          echo "media: ok"
 
       - name: verify the runtime can open a window
         run: |
