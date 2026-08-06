@@ -702,8 +702,7 @@ jobs:
           # and media foundation, which is the only way to tell whether the
           # bundled gstreamer plugins were actually found: a wrong plugin path
           # still starts, still answers MFStartup, and just has no decoders
-          x86_64-w64-mingw32-gcc -O2 -o mfprobe.exe tests/mfprobe.c \
-            -lmfplat -lmfuuid -lole32
+          x86_64-w64-mingw32-gcc -O2 -o mfprobe.exe tests/mfprobe.c -lmfplat -lole32
           WINEDLLOVERRIDES="mscoree=d;mshtml=d" WINEDEBUG=-all \
             ./Libraries/Wine/bin/wine64 mfprobe.exe > mf.log 2>&1 || true
           grep -E '^\[|^RESULT|^FAIL' mf.log | tee -a "$GITHUB_STEP_SUMMARY"
