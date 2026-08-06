@@ -524,8 +524,11 @@ jobs:
             # the id, not only the dependencies: a dylib that still calls itself
             # /nix/store/... cannot be dlopened off the builder, which silently
             # cost us fonts, vulkan and tls in every build up to rt7
+            # *.dylib* and not *.dylib: some libraries carry their version
+            # after the extension (libfreeaptx.dylib.0, out of gst-plugins-bad's
+            # closure), and the narrower glob left those with a /nix/store id
             case "$f" in
-              *.dylib) install_name_tool -id "@loader_path/$(basename "$f")" "$f" 2>/dev/null || true ;;
+              *.dylib*) install_name_tool -id "@loader_path/$(basename "$f")" "$f" 2>/dev/null || true ;;
             esac
             for ref in $(scan "$f"); do
               if [[ "$(basename "$ref")" == libiconv*.dylib && "$(basename "$f")" == libintl* ]]; then
@@ -536,9 +539,11 @@ jobs:
             done
             codesign -f -s - "$f" 2>/dev/null || true
           }
-          for f in "$LIBDIR"/*.dylib; do fixup "$f"; done
+          for f in "$LIBDIR"/*.dylib*; do
+            if [ -f "$f" ]; then fixup "$f"; fi
+          done
           # the plugins sit one level down, so fixup's relpath resolves to ".."
-          for f in "$LIBDIR"/gstreamer-1.0/*.dylib; do
+          for f in "$LIBDIR"/gstreamer-1.0/*.dylib*; do
             if [ -f "$f" ]; then fixup "$f"; fi
           done
           find Libraries/Wine/bin -type f | while read -r f; do fixup "$f"; done
