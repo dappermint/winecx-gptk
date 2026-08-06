@@ -19,6 +19,8 @@ on:
 env:
   WINECX_COMMIT: aa5ddd8eae4d785a95a6199f17e9deed6625f07f
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
+  DXVK_VERSION: "1.10.3"
+  DXMT_VERSION: "0.80"
 
 jobs:
   build:
@@ -59,13 +61,8 @@ jobs:
             echo "CCACHE_FILECLONE=1"
             echo "CCACHE_INODECACHE=1"
           } >> "$GITHUB_ENV"
-          # wrappers so the PE half's cross compilers go through ccache too;
-          # llvm-mingw lands at $PWD/llvm-mingw two steps later
-          mkdir -p ccache-bin
-          for t in x86_64-w64-mingw32-clang i686-w64-mingw32-clang; do
-            printf '#!/bin/sh\nexec ccache "%s/llvm-mingw/bin/%s" "$@"\n' "$PWD" "$t" > "ccache-bin/$t"
-            chmod +x "ccache-bin/$t"
-          done
+          # the PE half's cross compilers are wrapped in the mingw step, once
+          # their real paths are known
 
       - name: restore compiler cache
         uses: actions/cache@v4
@@ -95,12 +92,32 @@ jobs:
             git -C winecx apply --verbose "$p"
           done
 
-      - name: llvm-mingw for the PE half
+      # gcc, not llvm-mingw. measured 2026-08-04 by module bisection: with a
+      # kernelbase.dll built by llvm-mingw, steam never completes its CM login,
+      # it loops "EConnect called - scheduling connection for 50ms from now"
+      # forever and reports Schedule init returned 22 (k_EResultPending).
+      # swapping in a gcc-built kernelbase.dll and changing nothing else logs
+      # in within 30s, and swapping it back reproduces the stall. every other
+      # module of ours is fine, including ntdll and the whole i386 half.
+      # this is what blocked this runtime for days.
+      - name: mingw-w64 gcc for the PE half
         run: |
-          curl -sL -o llvm-mingw.tar.xz \
-            https://github.com/mstorsjo/llvm-mingw/releases/download/20260616/llvm-mingw-20260616-ucrt-macos-universal.tar.xz
-          tar -xf llvm-mingw.tar.xz
-          mv llvm-mingw-* llvm-mingw
+          command -v x86_64-w64-mingw32-gcc >/dev/null || brew install -q mingw-w64
+          x86_64-w64-mingw32-gcc --version | head -1
+          i686-w64-mingw32-gcc --version | head -1
+          # wrappers so the PE half goes through ccache too; brew's gcc is not
+          # something ccache picks up by itself
+          mkdir -p ccache-bin
+          for t in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
+            # resolve the real binary now and bake the absolute path in: doing
+            # the lookup inside the wrapper recurses forever, because by then
+            # ccache-bin is first on PATH and `command -v` finds the wrapper
+            real=$(command -v "$t") || { echo "::error::$t not found"; exit 1; }
+            printf '#!/bin/sh\nexec ccache "%s" "$@"\n' "$real" > "ccache-bin/$t"
+            chmod +x "ccache-bin/$t"
+          done
+          PATH="$PWD/ccache-bin:$PATH" x86_64-w64-mingw32-gcc --version >/dev/null
+          PATH="$PWD/ccache-bin:$PATH" i686-w64-mingw32-gcc --version >/dev/null
 
       - name: nix toolchain and x86_64 libs
         run: |
@@ -140,7 +157,7 @@ jobs:
         env:
           OPT_LEVEL: ${{ inputs.opt }}
         run: |
-          export PATH="$PWD/ccache-bin:$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
+          export PATH="$PWD/ccache-bin:$NIX_TOOL_PATH$PATH"
           export SDKROOT="$(/usr/bin/xcrun --show-sdk-path)"
           export CC="ccache /usr/bin/clang -arch x86_64"
           export CXX="ccache /usr/bin/clang++ -arch x86_64"
@@ -189,7 +206,7 @@ jobs:
 
       - name: make
         run: |
-          export PATH="$PWD/ccache-bin:$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
+          export PATH="$PWD/ccache-bin:$NIX_TOOL_PATH$PATH"
           cd build
           # the runner has few cores and much of the work is i/o bound behind
           # winebuild, so oversubscribing by half keeps them fed
@@ -244,9 +261,22 @@ jobs:
           [ -d "addons/gecko/wine-gecko-$gecko_ver-x86_64" ] || { echo "gecko tarball layout changed"; exit 1; }
           du -sh addons/mono addons/gecko
 
+          # a runtime with no d3d11 implementation cannot render chromium:
+          # wined3d goes through apple's opengl, frozen at 4.1, which gives
+          # ANGLE feature level 9_3 and a hard "GLES 3.0 > max supported 2.0".
+          # dxvk and dxmt are what make steam's ui appear.
+          mkdir -p payload
+          fetch "https://github.com/Gcenx/DXVK-macOS/releases/download/v$DXVK_VERSION-20230507-repack/dxvk-macOS-async-v$DXVK_VERSION-20230507-repack.tar.gz" \
+                dxvk.tar.gz acd1520ad105d8ef124a09c8e11a259a5dc8bdc565ad18e0e52693f9807b2477
+          fetch "https://github.com/3Shain/dxmt/releases/download/v$DXMT_VERSION/dxmt-v$DXMT_VERSION-builtin.tar.gz" \
+                dxmt.tar.gz 8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d
+          tar -xzf dxvk.tar.gz -C payload
+          tar -xzf dxmt.tar.gz -C payload
+          ls payload
+
       - name: install and package
         run: |
-          export PATH="$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
+          export PATH="$NIX_TOOL_PATH$PATH"
           cd build
           make install DESTDIR="$PWD/../staging"
           mkdir -p "$PWD/../staging/opt/whiskywine/share/wine/mono" "$PWD/../staging/opt/whiskywine/share/wine/gecko"
@@ -258,20 +288,67 @@ jobs:
           cp -R staging/opt/whiskywine/lib Libraries/Wine/lib
           cp -R staging/opt/whiskywine/share Libraries/Wine/share
 
-          # llvm-mingw builds the PE half with DWARF and nothing strips it, so
-          # ntdll.dll ships at 3.0MB against the stock engine's 0.7MB. and the
-          # .a import libraries are link-time only; the stock engine ships none.
-          # together they are ~600MB of the tree.
-          command -v llvm-strip >/dev/null || { echo "::error::llvm-strip not on PATH"; exit 1; }
+          # dxmt's wine-side half is ONLY the winemetal bridge. copying the
+          # whole payload dir in here would overwrite wine's builtin
+          # d3d11/dxgi with dxmt's, which makes every fresh prefix run dxmt
+          # silently -- and dxmt refuses the cross-process swapchains steam's
+          # post-2026-08 webhelper creates, so the login window never maps. it
+          # would also put nvapi64.dll in the builtins, which must never be
+          # visible to the webhelper: chromium probes for an nvidia gpu, loads
+          # d3dmetal, and takes the helper down with it. the d3d frontends stay
+          # per-bottle in Libraries/DXMT, deployed by whisky's backend picker.
+          dxmt=payload/v$DXMT_VERSION
+          cp -R "$dxmt/x86_64-unix/." Libraries/Wine/lib/wine/x86_64-unix/
+          cp "$dxmt/x86_64-windows/winemetal.dll" Libraries/Wine/lib/wine/x86_64-windows/
+          if [ -f "$dxmt/i386-windows/winemetal.dll" ]; then
+            cp "$dxmt/i386-windows/winemetal.dll" Libraries/Wine/lib/wine/i386-windows/
+          fi
+
+          # and the per-bottle payloads whisky's backend picker offers
+          dxvk=payload/dxvk-macOS-async-v$DXVK_VERSION-20230507-repack
+          mkdir -p Libraries/DXVK Libraries/DXMT
+          cp -R "$dxvk/." Libraries/DXVK/
+          cp -R "$dxmt/x86_64-windows" Libraries/DXMT/x64
+          cp -R "$dxmt/i386-windows" Libraries/DXMT/x32
+
+          # whisky decides whether a prefix dll is "really" native by reading
+          # 16 bytes at offset 0x40 and looking for "Wine builtin DLL". dxmt's
+          # three d3d frontends carry that marker, so whisky's loader ignores
+          # them in a bottle and silently falls back to wined3d. strip it back
+          # to the stock DOS stub on exactly those three. nvapi64/nvngx must
+          # keep their markers: steam's webhelper dies without them.
+          for arch in x64 x32; do
+            for dll in d3d11.dll d3d10core.dll dxgi.dll; do
+              f="Libraries/DXMT/$arch/$dll"
+              [ -f "$f" ] || continue
+              printf '\016\037\272\016\000\264\011\315\041\270\001\114\315\041\220\220' \
+                | dd of="$f" bs=1 seek=64 conv=notrunc status=none
+            done
+          done
+          for arch in x64 x32; do
+            for dll in d3d11.dll d3d10core.dll dxgi.dll; do
+              f="Libraries/DXMT/$arch/$dll"
+              [ -f "$f" ] || continue
+              if dd if="$f" bs=1 skip=64 count=16 status=none | grep -q 'Wine builtin'; then
+                echo "::error::$f still carries the builtin marker"; exit 1
+              fi
+            done
+          done
+
+          # gcc emits DWARF and nothing strips it, so ntdll.dll ships at 3.0MB
+          # against the stock engine's 0.7MB. and the .a import libraries are
+          # link-time only; the stock engine ships none. together they are
+          # ~600MB of the tree.
+          command -v x86_64-w64-mingw32-strip >/dev/null || {
+            echo "::error::x86_64-w64-mingw32-strip not on PATH"; exit 1; }
           find Libraries/Wine/lib/wine/*-windows -name '*.a' -delete
-          # one file at a time: a few entries are not COFF (.tlb, .nls) and a
-          # batched invocation would abandon the rest of its batch on the first
-          # of them. the size gate below is what actually decides
-          # one file per invocation, but in parallel: -n 1 keeps a non-COFF
-          # entry from taking its neighbours down with it
+          # batched: gnu strip prints an error for a non-COFF file (.tlb, .nls)
+          # and keeps going with the rest of the batch, unlike llvm-strip which
+          # abandoned it, so the old one-file-per-spawn form burned ~10k
+          # process launches, each taxed by the rosetta analytics daemons
           find Libraries/Wine/lib/wine/*-windows -type f -print0 \
-            | xargs -0 -P "$(sysctl -n hw.logicalcpu)" -n 1 \
-                llvm-strip --strip-debug 2>/dev/null || true
+            | xargs -0 -P "$(sysctl -n hw.logicalcpu)" -n 64 \
+                x86_64-w64-mingw32-strip --strip-debug 2>/dev/null || true
           # CW HACK 22144: on apple without a preloader the loader expects its
           # own binary to be named wineloader; whisky expects wine64
           cp Libraries/Wine/bin/wine Libraries/Wine/bin/wineloader
@@ -344,6 +421,29 @@ jobs:
             codesign -f -s - "$f" 2>/dev/null || true
           done
 
+          # whisky's GPTKImporter deploys apple's payload into this directory
+          # and symlinks lib/wine/x86_64-unix/{d3d10,d3d11,d3d12,dxgi}.so at
+          # libd3dshared.dylib. it must exist in the tarball or the importer
+          # has nowhere to put it; tar drops empty directories, hence the file.
+          mkdir -p Libraries/Wine/lib/external
+          cat > Libraries/Wine/lib/external/README <<'EOF'
+          apple's game porting toolkit payload goes here: D3DMetal.framework
+          and libd3dshared.dylib, as copies, with lib/wine/x86_64-unix/d3d10.so,
+          d3d11.so, d3d12.so and dxgi.so as symlinks to ../../external/
+          libd3dshared.dylib.
+
+          symlinks, never copies: libd3dshared resolves the framework through
+          @rpath/D3DMetal.framework/D3DMetal and its only LC_RPATH is
+          @loader_path, so a copy into x86_64-unix/ moves @loader_path away
+          from lib/external and d3dmetal dies on an assertion with no wine
+          error at all.
+
+          not shipped in this artifact: apple's gptk is not redistributable.
+          whisky's GPTKImporter fills this in from your own gptk install, and
+          Gaems/install-whiskywine.sh --gptk does the same for a manual
+          install.
+          EOF
+
           cat > Libraries/WhiskyWineVersion.plist <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -351,6 +451,10 @@ jobs:
           <dict>
             <key>gptkCapable</key>
             <true/>
+            <key>dxvkVersion</key>
+            <string>DXVK_VER</string>
+            <key>dxmtVersion</key>
+            <string>DXMT_VER</string>
             <key>version</key>
             <dict>
               <key>major</key>
@@ -363,6 +467,8 @@ jobs:
           </dict>
           </plist>
           PLIST
+          sed -i '' "s/DXVK_VER/$DXVK_VERSION/; s/DXMT_VER/$DXMT_VERSION/" Libraries/WhiskyWineVersion.plist
+
       - name: verify the tree is relocatable
         run: |
           # every build up to rt7 shipped dylibs whose own id was a /nix/store
@@ -411,6 +517,30 @@ jobs:
           done
           echo "addons: ok"
 
+          # without a d3d11 implementation steam paints nothing: wined3d goes
+          # through apple's opengl, frozen at 4.1, and ANGLE reports feature
+          # level 9_3 against chromium's hard GLES 3.0 requirement
+          [ -f Libraries/DXVK/x64/d3d11.dll ] || { echo "::error::no dxvk payload"; exit 1; }
+          [ -f Libraries/Wine/lib/wine/x86_64-unix/winemetal.so ] || {
+            echo "::error::no dxmt builtin"; exit 1; }
+          [ -d Libraries/Wine/lib/external ] || {
+            echo "::error::no lib/external for the gptk payload"; exit 1; }
+          # the builtin d3d must be wine's own: a dxmt-flavoured builtin
+          # hijacks every fresh prefix and then refuses steam's cross-process
+          # swapchains, so the login window never maps
+          for d in d3d11 dxgi d3d10core; do
+            if strings "Libraries/Wine/lib/wine/x86_64-windows/$d.dll" 2>/dev/null \
+               | grep -q 'DXMT_\|dxmt\.con'; then
+              echo "::error::builtin $d.dll is dxmt, not wine"; exit 1
+            fi
+          done
+          # and nvapi64 must not be a builtin at all
+          if [ -f Libraries/Wine/lib/wine/x86_64-windows/nvapi64.dll ]; then
+            echo "::error::nvapi64.dll is in the builtins; the webhelper dies on it"
+            exit 1
+          fi
+          echo "graphics payloads: ok"
+
       - name: verify the runtime can open a window
         run: |
           # the three gates above inspect the tree; none of them runs anything,
@@ -418,8 +548,8 @@ jobs:
           # passed all of them. the display driver failing to init is invisible
           # short of asking for a window: wine falls back to nodrv, keeps going,
           # and only CreateWindowEx tells you, with ERROR_INVALID_WINDOW_HANDLE.
-          export PATH="$NIX_TOOL_PATH$PWD/llvm-mingw/bin:$PATH"
-          x86_64-w64-mingw32-clang -O2 -o winmsg.exe tests/winmsg.c -luser32
+          export PATH="$NIX_TOOL_PATH$PATH"
+          x86_64-w64-mingw32-gcc -O2 -o winmsg.exe tests/winmsg.c -luser32
 
           export WINEPREFIX="$PWD/smoke-prefix"
           export DYLD_FALLBACK_LIBRARY_PATH="$PWD/Libraries/Wine/lib"
