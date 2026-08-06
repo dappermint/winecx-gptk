@@ -360,19 +360,8 @@ jobs:
                 dxvk.tar.gz acd1520ad105d8ef124a09c8e11a259a5dc8bdc565ad18e0e52693f9807b2477
           fetch "https://github.com/3Shain/dxmt/releases/download/v$DXMT_VERSION/dxmt-v$DXMT_VERSION-builtin.tar.gz" \
                 dxmt.tar.gz 8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d
-          # the 20230507 repack deliberately ships only d3d10core and d3d11, so
-          # d3d9 games fall all the way back to wined3d over apple's opengl.
-          # the earlier crossover build of the same dxvk 1.10.3 carries the
-          # full set; take its d3d9 and nothing else, because its dxgi and
-          # d3d10 would displace the pairing the repack is curated for.
-          # dxvk's d3d9 imports no dxgi at all (checked: only kernel32,
-          # user32, gdi32, advapi32, ntdll, msvcrt and winevulkan), so it
-          # drops in beside the repack without disturbing builtin dxgi.
-          fetch "https://github.com/Gcenx/DXVK-macOS/releases/download/v$DXVK_VERSION-20230402/dxvk-macOS-async-v$DXVK_VERSION-20230402-CrossOver.tar.gz" \
-                dxvk-cx.tar.gz be657e1416ed792fdb783d1e6dea112c388be5eca7e96652e1a40a96b27ab240
           tar -xzf dxvk.tar.gz -C payload
           tar -xzf dxmt.tar.gz -C payload
-          tar -xzf dxvk-cx.tar.gz -C payload
           ls payload
 
       - name: install and package
@@ -407,11 +396,8 @@ jobs:
 
           # and the per-bottle payloads whisky's backend picker offers
           dxvk=payload/dxvk-macOS-async-v$DXVK_VERSION-20230507-repack
-          dxvkcx=payload/dxvk-macOS-async-v$DXVK_VERSION-20230402-CrossOver
           mkdir -p Libraries/DXVK Libraries/DXMT
           cp -R "$dxvk/." Libraries/DXVK/
-          cp "$dxvkcx/x64/d3d9.dll" Libraries/DXVK/x64/d3d9.dll
-          cp "$dxvkcx/x32/d3d9.dll" Libraries/DXVK/x32/d3d9.dll
           cp -R "$dxmt/x86_64-windows" Libraries/DXMT/x64
           cp -R "$dxmt/i386-windows" Libraries/DXMT/x32
 
@@ -663,12 +649,6 @@ jobs:
           # through apple's opengl, frozen at 4.1, and ANGLE reports feature
           # level 9_3 against chromium's hard GLES 3.0 requirement
           [ -f Libraries/DXVK/x64/d3d11.dll ] || { echo "::error::no dxvk payload"; exit 1; }
-          for a in x64 x32; do
-            [ -f "Libraries/DXVK/$a/d3d9.dll" ] || {
-              echo "::error::no dxvk d3d9 for $a; d3d9 games would fall back to wined3d"
-              exit 1
-            }
-          done
           [ -f Libraries/Wine/lib/wine/x86_64-unix/winemetal.so ] || {
             echo "::error::no dxmt builtin"; exit 1; }
           [ -d Libraries/Wine/lib/external ] || {
@@ -738,27 +718,26 @@ jobs:
           }
           echo "windows: ok"
 
-          # and now d3d9 on dxvk, the same way a bottle gets it: the dll into
-          # system32 with a native override, dxgi left builtin. a d3d9.dll
-          # that fails to load is silent -- wine falls back to its own builtin
-          # and everything still runs, just on apple's opengl.
+          # d3d9 runs on wine's builtin here, over wined3d, and that is not a
+          # gap left open by accident. DXVK's d3d9 requests geometryShader and
+          # shaderCullDistance unconditionally (flags 5 and 39 of
+          # VkPhysicalDeviceFeatures), Metal has neither, and MoltenVK answers
+          # vkCreateDevice with VK_ERROR_FEATURE_NOT_PRESENT -- measured
+          # 2026-08-06 on 1.2.11 and confirmed still absent in 1.4.1. that is
+          # why Gcenx's macOS repack carries no d3d9.dll. shipping one anyway
+          # would be a regression: whisky overrides d3d9 to native whenever the
+          # file exists, so games that work today would start failing with
+          # D3DERR_NOTAVAILABLE.
           x86_64-w64-mingw32-gcc -O2 -o d3d9feat.exe tests/d3d9feat.c -ld3d9 -luser32
-          cp Libraries/DXVK/x64/d3d9.dll "$WINEPREFIX/drive_c/windows/system32/"
-          WINEDLLOVERRIDES="d3d9=n;mscoree=d;mshtml=d" WINEDEBUG=-all \
+          WINEDLLOVERRIDES="mscoree=d;mshtml=d" WINEDEBUG=-all \
             ./Libraries/Wine/bin/wine64 d3d9feat.exe > d3d9.log 2>&1 || true
           grep -E '^\[|^RESULT|^FAIL' d3d9.log | tee -a "$GITHUB_STEP_SUMMARY"
           grep -q "RESULT: d3d9 device up" d3d9.log || {
-            echo "::error::d3d9 on dxvk does not come up"
+            echo "::error::builtin d3d9 does not come up"
             tail -20 d3d9.log
             exit 1
           }
-          # shader model 3.0 is the discriminator: wined3d over apple's GL
-          # cannot reach it, so a warn here means the override did not take
-          if grep -q '^\[warn\]' d3d9.log; then
-            echo "::error::d3d9 came up below shader model 3.0; this is not dxvk"
-            exit 1
-          fi
-          echo "d3d9: ok"
+          echo "d3d9: ok (builtin/wined3d)"
 
           # and media foundation, which is the only way to tell whether the
           # bundled gstreamer plugins were actually found: a wrong plugin path
