@@ -6,6 +6,7 @@
  * that fails to load is silent: wine falls back to its builtin and everything
  * still runs, just slowly and wrongly.
  */
+#define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
 #include <stdio.h>
