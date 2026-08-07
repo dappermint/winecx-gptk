@@ -26,6 +26,10 @@ env:
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
   DXVK_VERSION: "1.10.3"
   DXMT_VERSION: "0.80"
+  # Without this every binary carries the minos of whatever built it, so the
+  # self-hosted runner stamped macOS 27 onto a runtime dyld then refuses to load
+  # anywhere older. Whisky's own floor has to match this number.
+  MACOSX_DEPLOYMENT_TARGET: "26.0"
 
 jobs:
   build:
@@ -618,6 +622,28 @@ jobs:
             exit 1
           fi
           echo "relocatable: ok"
+
+          # v4.0.0 shipped with minos 27.0 on wine64, wineserver and every unix
+          # module, because it was built on a macOS 27 runner with no deployment
+          # target set. dyld refuses those outright below that version, and
+          # nothing here noticed: the tree was complete and every other gate
+          # passed. older is fine, newer is unloadable.
+          floor="${MACOSX_DEPLOYMENT_TARGET%%.*}"
+          : > /tmp/toonew
+          find Libraries -type f ! -type l -print0 | while IFS= read -r -d '' f; do
+            file -b "$f" | grep -q Mach-O || continue
+            minos=$(otool -l "$f" 2>/dev/null | awk '/LC_BUILD_VERSION/{v=1} v && /minos/{print $2; exit}')
+            [ -n "$minos" ] || continue
+            if [ "${minos%%.*}" -gt "$floor" ]; then
+              echo "$f minos $minos" >> /tmp/toonew
+            fi
+          done
+          if [ -s /tmp/toonew ]; then
+            sed 's/^/::error::built too new: /' /tmp/toonew
+            echo "$(wc -l < /tmp/toonew) binary(s) above macOS $floor; refusing to ship"
+            exit 1
+          fi
+          echo "deployment target: nothing newer than macOS $floor"
 
           # a 64-bit-only tree cannot load syswow64\ntdll.dll, so every 32-bit
           # program dies with c0000135. one build shipped with this empty.
