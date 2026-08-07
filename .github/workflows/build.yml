@@ -8,6 +8,10 @@ on:
         type: choice
         default: standard
         options: [standard, release, fast]
+      runtime_version:
+        description: "version stamped into WhiskyWineVersion.plist; must match the release tag it is published under"
+        type: string
+        default: "4.1.0"
       runner:
         description: "where to build: self-hosted is ~10x faster, hosted is the clean-room check"
         type: choice
@@ -610,16 +614,28 @@ jobs:
             <key>version</key>
             <dict>
               <key>major</key>
-              <integer>4</integer>
+              <integer>VER_MAJOR</integer>
               <key>minor</key>
-              <integer>0</integer>
+              <integer>VER_MINOR</integer>
               <key>patch</key>
-              <integer>0</integer>
+              <integer>VER_PATCH</integer>
             </dict>
           </dict>
           </plist>
           PLIST
+          # the version was a constant here, so every build stamped 4.0.0 whatever
+          # it was published as. the app reads this file, not the release tag, so
+          # a mismatch makes it offer the same update forever.
+          rv="${{ inputs.runtime_version || '4.1.0' }}"
+          case "$rv" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::runtime_version '$rv' is not major.minor.patch"; exit 1;;
+          esac
           sed -i '' "s/DXVK_VER/$DXVK_VERSION/; s/DXMT_VER/$DXMT_VERSION/" Libraries/WhiskyWineVersion.plist
+          sed -i '' "s/VER_MAJOR/${rv%%.*}/; s/VER_MINOR/$(echo "$rv" | cut -d. -f2)/; s/VER_PATCH/${rv##*.}/" \
+            Libraries/WhiskyWineVersion.plist
+          grep -q VER_ Libraries/WhiskyWineVersion.plist && { echo "::error::version not substituted"; exit 1; }
+          echo "runtime version stamped: $rv"
 
       - name: verify the tree is relocatable
         run: |
