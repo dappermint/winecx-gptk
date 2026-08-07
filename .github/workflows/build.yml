@@ -220,6 +220,13 @@ jobs:
             --without-opencl --without-ffmpeg --without-cups \
             --disable-tests
           make -j"$(sysctl -n hw.ncpu)" __tooldeps__
+          # wrc resolves its nls data relative to its own binary
+          # (tools/wrc/../../nls, see get_nlsdir in tools/tools.h), and
+          # __tooldeps__ never populates an out-of-tree nls dir. a persistent
+          # workspace can carry one from an earlier full make, which is why
+          # this only surfaces on a fresh hosted runner: the main build's
+          # first .res file dies with "unable to load locale.nls".
+          ln -sfn ../winecx/nls nls
 
       - name: configure
         env:
