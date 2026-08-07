@@ -33,7 +33,7 @@ env:
 
 jobs:
   build:
-    runs-on: ${{ inputs.runner == 'hosted' && fromJSON('["macos-15"]') || fromJSON('["self-hosted","macOS","ARM64"]') }}
+    runs-on: ${{ inputs.runner == 'hosted' && fromJSON('["macos-26"]') || fromJSON('["self-hosted","macOS","ARM64"]') }}
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
@@ -306,7 +306,20 @@ jobs:
           # winebuild, so oversubscribing by half keeps them fed
           ncpu=$(sysctl -n hw.logicalcpu)
           ccache -z >/dev/null
-          make -j"$(( ncpu + ncpu / 2 ))"
+          set -o pipefail
+          make -j"$(( ncpu + ncpu / 2 ))" 2>&1 | tee /tmp/make.log
+
+          # pinning the deployment target stops the binaries claiming to be
+          # newer, but not configure finding an API the SDK declares and the
+          # floor does not have: v4.0.1 linked pipe2, macOS 27 only, and
+          # ntdll.so would not have loaded on 26 at all. build on a runner whose
+          # SDK matches the floor and this stays quiet.
+          if grep -q "has been marked as being introduced in macOS" /tmp/make.log; then
+            grep -oE "'[a-z_0-9]+' has been marked as being introduced in macOS [0-9.]+" /tmp/make.log \
+              | sort -u | sed 's/^/::error::newer than the floor: /'
+            echo "::error::the SDK offered APIs newer than $MACOSX_DEPLOYMENT_TARGET; build on a matching runner"
+            exit 1
+          fi
           # per-run numbers, not lifetime ones: this is how we tell whether
           # the restored cache actually did anything
           {
@@ -623,11 +636,8 @@ jobs:
           fi
           echo "relocatable: ok"
 
-          # v4.0.0 shipped with minos 27.0 on wine64, wineserver and every unix
-          # module, because it was built on a macOS 27 runner with no deployment
-          # target set. dyld refuses those outright below that version, and
-          # nothing here noticed: the tree was complete and every other gate
-          # passed. older is fine, newer is unloadable.
+          # v4.0.0 shipped minos 27.0 and dyld refuses that below 27. older is
+          # fine, newer is unloadable, and no other gate can see it.
           floor="${MACOSX_DEPLOYMENT_TARGET%%.*}"
           : > /tmp/toonew
           find Libraries -type f ! -type l -print0 | while IFS= read -r -d '' f; do
