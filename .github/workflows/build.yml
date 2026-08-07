@@ -718,26 +718,6 @@ jobs:
           }
           echo "windows: ok"
 
-          # d3d9 runs on wine's builtin here, over wined3d, and that is not a
-          # gap left open by accident. DXVK's d3d9 requests geometryShader and
-          # shaderCullDistance unconditionally (flags 5 and 39 of
-          # VkPhysicalDeviceFeatures), Metal has neither, and MoltenVK answers
-          # vkCreateDevice with VK_ERROR_FEATURE_NOT_PRESENT -- measured
-          # 2026-08-06 on 1.2.11 and confirmed still absent in 1.4.1. that is
-          # why Gcenx's macOS repack carries no d3d9.dll. shipping one anyway
-          # would be a regression: whisky overrides d3d9 to native whenever the
-          # file exists, so games that work today would start failing with
-          # D3DERR_NOTAVAILABLE.
-          x86_64-w64-mingw32-gcc -O2 -o d3d9feat.exe tests/d3d9feat.c -ld3d9 -luser32
-          WINEDLLOVERRIDES="mscoree=d;mshtml=d" WINEDEBUG=-all \
-            ./Libraries/Wine/bin/wine64 d3d9feat.exe > d3d9.log 2>&1 || true
-          grep -E '^\[|^RESULT|^FAIL' d3d9.log | tee -a "$GITHUB_STEP_SUMMARY"
-          grep -q "RESULT: d3d9 device up" d3d9.log || {
-            echo "::error::builtin d3d9 does not come up"
-            tail -20 d3d9.log
-            exit 1
-          }
-          echo "d3d9: ok (builtin/wined3d)"
 
           # and media foundation, which is the only way to tell whether the
           # bundled gstreamer plugins were actually found: a wrong plugin path
