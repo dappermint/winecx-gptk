@@ -226,7 +226,13 @@ jobs:
           # workspace can carry one from an earlier full make, which is why
           # this only surfaces on a fresh hosted runner: the main build's
           # first .res file dies with "unable to load locale.nls".
-          ln -sfn ../winecx/nls nls
+          # link the file, not the dir: if configure already made nls/ a real
+          # directory, a dir symlink silently lands inside it as nls/nls,
+          # which is how the first attempt at this fix failed. same shape as
+          # the main build's own locale.nls rule. then prove it resolves, so
+          # a regression fails here and not two minutes into make.
+          rm -rf nls && mkdir nls && ln -s ../../winecx/nls/locale.nls nls/locale.nls
+          test -r nls/locale.nls || { echo "::error::tools nls dir does not resolve"; exit 1; }
 
       - name: configure
         env:
