@@ -312,6 +312,8 @@ jobs:
           echo "gstreamer: found"
 
       - name: make
+        env:
+          OPT_LEVEL: ${{ inputs.opt }}
         run: |
           export PATH="$PWD/ccache-bin:$NIX_TOOL_PATH$PATH"
           cd build
@@ -328,10 +330,17 @@ jobs:
           # ntdll.so would not have loaded on 26 at all. build on a runner whose
           # SDK matches the floor and this stays quiet.
           if grep -q "has been marked as being introduced in macOS" /tmp/make.log; then
-            grep -oE "'[a-z_0-9]+' has been marked as being introduced in macOS [0-9.]+" /tmp/make.log \
-              | sort -u | sed 's/^/::error::newer than the floor: /'
-            echo "::error::the SDK offered APIs newer than $MACOSX_DEPLOYMENT_TARGET; build on a matching runner"
-            exit 1
+            syms=$(grep -oE "'[a-z_0-9]+' has been marked as being introduced in macOS [0-9.]+" /tmp/make.log | sort -u)
+            # fatal only for a build that could be published. the self hosted lane
+            # is a newer macOS than the floor, so its SDK always offers something,
+            # and failing every push there would cost the fast lane for nothing.
+            if [ "${OPT_LEVEL:-}" = "release" ]; then
+              printf '%s\n' "$syms" | sed 's/^/::error::newer than the floor: /'
+              echo "::error::a release cannot link these; build on a runner whose SDK matches $MACOSX_DEPLOYMENT_TARGET"
+              exit 1
+            fi
+            printf '%s\n' "$syms" | sed 's/^/::warning::newer than the floor: /'
+            echo "::warning::not shippable as built; fine to iterate on, a release needs the hosted lane"
           fi
           # per-run numbers, not lifetime ones: this is how we tell whether
           # the restored cache actually did anything
