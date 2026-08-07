@@ -224,6 +224,11 @@ jobs:
             --without-opencl --without-ffmpeg --without-cups \
             --disable-tests
           make -j"$(sysctl -n hw.ncpu)" __tooldeps__
+          # wrc finds its nls directory relative to its own binary, and these
+          # tools sit in a tree of their own, so without this it depends on
+          # whether the main build happened to link nls/ first. the hosted
+          # runner lost that race on appwiz.res: "unable to load locale.nls".
+          [ -e nls ] || ln -s ../winecx/nls nls
 
       - name: configure
         env:
