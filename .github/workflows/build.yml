@@ -228,7 +228,14 @@ jobs:
           # tools sit in a tree of their own, so without this it depends on
           # whether the main build happened to link nls/ first. the hosted
           # runner lost that race on appwiz.res: "unable to load locale.nls".
-          [ -e nls ] || ln -s ../winecx/nls nls
+          # link the files, not the directory: configure already made an empty
+          # nls/ here, so a guard on the directory existing never fires.
+          mkdir -p nls
+          for f in ../winecx/nls/*.nls; do
+            ln -sf "../../winecx/nls/$(basename "$f")" "nls/$(basename "$f")"
+          done
+          [ -r nls/locale.nls ] || { echo "::error::nls/locale.nls unreadable in the tools tree"; exit 1; }
+          echo "tools nls: $(ls nls | wc -l | tr -d ' ') files linked"
 
       - name: configure
         env:
