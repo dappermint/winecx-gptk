@@ -224,18 +224,15 @@ jobs:
             --without-opencl --without-ffmpeg --without-cups \
             --disable-tests
           make -j"$(sysctl -n hw.ncpu)" __tooldeps__
-          # wrc finds its nls directory relative to its own binary, and these
-          # tools sit in a tree of their own, so without this it depends on
-          # whether the main build happened to link nls/ first. the hosted
-          # runner lost that race on appwiz.res: "unable to load locale.nls".
-          # link the files, not the directory: configure already made an empty
-          # nls/ here, so a guard on the directory existing never fires.
-          mkdir -p nls
-          for f in ../winecx/nls/*.nls; do
-            ln -sf "../../winecx/nls/$(basename "$f")" "nls/$(basename "$f")"
-          done
-          [ -r nls/locale.nls ] || { echo "::error::nls/locale.nls unreadable in the tools tree"; exit 1; }
-          echo "tools nls: $(ls nls | wc -l | tr -d ' ') files linked"
+          # wrc resolves its nls data relative to its own binary
+          # (tools/wrc/../../nls, get_nlsdir in tools/tools.h) and __tooldeps__
+          # never creates nls/ in a fresh out-of-tree build dir. the self hosted
+          # lane carries one over from an earlier full make, which is why only
+          # the clean room lane ever saw this.
+          # link the file, not the dir: if configure already made nls/ a real
+          # directory, a dir symlink silently lands inside it as nls/nls.
+          rm -rf nls && mkdir nls && ln -s ../../winecx/nls/locale.nls nls/locale.nls
+          test -r nls/locale.nls || { echo "::error::tools nls dir does not resolve"; exit 1; }
 
       - name: configure
         env:
