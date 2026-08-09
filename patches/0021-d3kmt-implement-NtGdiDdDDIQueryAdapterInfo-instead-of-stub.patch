@@ -1,0 +1,98 @@
+From a3537f43abff2d6bdc487f616f6eb8f8e071a90c Mon Sep 17 00:00:00 2001
+From: Vladislav Mironov <57950551+glutesha@users.noreply.github.com>
+Date: Sun, 9 Aug 2026 16:08:45 +0300
+Subject: [PATCH] Implement NtGdiDdDDIQueryAdapterInfo instead of stubbing
+
+---
+ dlls/win32u/d3dkmt.c   | 35 ++++++++++++++++++++++++++++++++---
+ include/ddk/d3dkmthk.h | 21 +++++++++++++++++++++
+ 2 files changed, 53 insertions(+), 3 deletions(-)
+ mode change 100644 => 100755 dlls/win32u/d3dkmt.c
+ mode change 100644 => 100755 include/ddk/d3dkmthk.h
+
+diff --git a/dlls/win32u/d3dkmt.c b/dlls/win32u/d3dkmt.c
+old mode 100644
+new mode 100755
+index 24a668a8..c213dd8e
+--- a/dlls/win32u/d3dkmt.c
++++ b/dlls/win32u/d3dkmt.c
+@@ -333,10 +333,39 @@ NTSTATUS WINAPI NtGdiDdDDIDestroyDevice( const D3DKMT_DESTROYDEVICE *desc )
+  */
+ NTSTATUS WINAPI NtGdiDdDDIQueryAdapterInfo( D3DKMT_QUERYADAPTERINFO *desc )
+ {
+-    if (!desc) return STATUS_INVALID_PARAMETER;
++    TRACE( "(%p).\n", desc );
+ 
+-    FIXME( "desc %p, type %d stub\n", desc, desc->Type );
+-    return STATUS_NOT_IMPLEMENTED;
++    if (!desc || !desc->hAdapter || !desc->pPrivateDriverData)
++        return STATUS_INVALID_PARAMETER;
++
++    switch (desc->Type)
++    {
++    case KMTQAITYPE_CHECKDRIVERUPDATESTATUS:
++    {
++        BOOL *value = desc->pPrivateDriverData;
++
++        if (desc->PrivateDriverDataSize < sizeof(*value))
++            return STATUS_INVALID_PARAMETER;
++
++        *value = FALSE;
++        return STATUS_SUCCESS;
++    }
++    case KMTQAITYPE_DRIVERVERSION:
++    {
++        D3DKMT_DRIVERVERSION *value = desc->pPrivateDriverData;
++
++        if (desc->PrivateDriverDataSize < sizeof(*value))
++            return STATUS_INVALID_PARAMETER;
++
++        *value = KMT_DRIVERVERSION_WDDM_3_1;
++        return STATUS_SUCCESS;
++    }
++    default:
++    {
++        FIXME( "type %d not handled.\n", desc->Type );
++        return STATUS_NOT_IMPLEMENTED;
++    }
++    }
+ }
+ 
+ /******************************************************************************
+diff --git a/include/ddk/d3dkmthk.h b/include/ddk/d3dkmthk.h
+old mode 100644
+new mode 100755
+index 7828941a..c067f477
+--- a/include/ddk/d3dkmthk.h
++++ b/include/ddk/d3dkmthk.h
+@@ -175,6 +175,27 @@ typedef struct _D3DKMT_DESTROYDCFROMMEMORY
+     HANDLE hBitmap;
+ } D3DKMT_DESTROYDCFROMMEMORY;
+ 
++typedef enum _QAI_DRIVERVERSION
++{
++    KMT_DRIVERVERSION_WDDM_1_0 = 1000,
++    KMT_DRIVERVERSION_WDDM_1_1_PRERELEASE = 1102,
++    KMT_DRIVERVERSION_WDDM_1_1 = 1105,
++    KMT_DRIVERVERSION_WDDM_1_2 = 1200,
++    KMT_DRIVERVERSION_WDDM_1_3 = 1300,
++    KMT_DRIVERVERSION_WDDM_2_0 = 2000,
++    KMT_DRIVERVERSION_WDDM_2_1 = 2100,
++    KMT_DRIVERVERSION_WDDM_2_2 = 2200,
++    KMT_DRIVERVERSION_WDDM_2_3 = 2300,
++    KMT_DRIVERVERSION_WDDM_2_4 = 2400,
++    KMT_DRIVERVERSION_WDDM_2_5 = 2500,
++    KMT_DRIVERVERSION_WDDM_2_6 = 2600,
++    KMT_DRIVERVERSION_WDDM_2_7 = 2700,
++    KMT_DRIVERVERSION_WDDM_2_8 = 2800,
++    KMT_DRIVERVERSION_WDDM_2_9 = 2900,
++    KMT_DRIVERVERSION_WDDM_3_0 = 3000,
++    KMT_DRIVERVERSION_WDDM_3_1 = 3100
++} D3DKMT_DRIVERVERSION;
++
+ typedef enum _KMTQUERYADAPTERINFOTYPE
+ {
+     KMTQAITYPE_UMDRIVERPRIVATE,
+-- 
+2.51.0
+
