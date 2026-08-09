@@ -1,0 +1,106 @@
+From 2429f645ca6c61a6f6abba2a88094d31be1adb11 Mon Sep 17 00:00:00 2001
+From: Vladislav Mironov <57950551+glutesha@users.noreply.github.com>
+Date: Sun, 9 Aug 2026 18:56:21 +0300
+Subject: [PATCH 2/2] Reimplement NtGdiDdDDIQueryAdapterInf like valve did
+
+---
+ dlls/win32u/d3dkmt.c   | 39 ++++++++++++++++++++++++++++++++++++++-
+ include/ddk/d3dkmthk.h | 16 ++++++++++++++++
+ 2 files changed, 54 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/win32u/d3dkmt.c b/dlls/win32u/d3dkmt.c
+index c213dd8e..87cf5835 100755
+--- a/dlls/win32u/d3dkmt.c
++++ b/dlls/win32u/d3dkmt.c
+@@ -30,6 +30,12 @@
+ #include "win32u_private.h"
+ #include "ntuser_private.h"
+ 
++#include <d3d9types.h>
++#include <dxgi.h>
++#include <d3d10.h>
++#include <d3d11.h>
++#include <d3d12.h>
++
+ WINE_DEFAULT_DEBUG_CHANNEL(vulkan);
+ 
+ struct d3dkmt_adapter
+@@ -333,6 +339,8 @@ NTSTATUS WINAPI NtGdiDdDDIDestroyDevice( const D3DKMT_DESTROYDEVICE *desc )
+  */
+ NTSTATUS WINAPI NtGdiDdDDIQueryAdapterInfo( D3DKMT_QUERYADAPTERINFO *desc )
+ {
++    struct d3dkmt_adapter *adapter;
++
+     TRACE( "(%p).\n", desc );
+ 
+     if (!desc || !desc->hAdapter || !desc->pPrivateDriverData)
+@@ -357,9 +365,38 @@ NTSTATUS WINAPI NtGdiDdDDIQueryAdapterInfo( D3DKMT_QUERYADAPTERINFO *desc )
+         if (desc->PrivateDriverDataSize < sizeof(*value))
+             return STATUS_INVALID_PARAMETER;
+ 
+-        *value = KMT_DRIVERVERSION_WDDM_3_1;
++        *value = KMT_DRIVERVERSION_WDDM_1_3;
+         return STATUS_SUCCESS;
+     }
++    case KMTQAITYPE_WDDM_2_7_CAPS:
++    {
++        VkPhysicalDeviceDriverPropertiesKHR driverProperties;
++        VkPhysicalDeviceProperties2KHR properties2;
++        D3DKMT_WDDM_2_7_CAPS *data = desc->pPrivateDriverData;
++        NTSTATUS status = STATUS_INVALID_PARAMETER;
++        const char *e;
++
++        if (desc->PrivateDriverDataSize < sizeof(*data))
++            return STATUS_INVALID_PARAMETER;
++
++        memset( data, 0, sizeof(*data) );
++
++        pthread_mutex_lock( &d3dkmt_lock );
++        if ((adapter = find_adapter_from_handle( desc->hAdapter )) && adapter->vk_device)
++        {
++            memset( &driverProperties, 0, sizeof(driverProperties) );
++            memset( &properties2, 0, sizeof(properties2) );
++            driverProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES_KHR;
++            properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2_KHR;
++            properties2.pNext = &driverProperties;
++            pvkGetPhysicalDeviceProperties2KHR( adapter->vk_device, &properties2 );
++
++            status = STATUS_SUCCESS;
++        }
++        pthread_mutex_unlock( &d3dkmt_lock );
++
++        return status;
++    }
+     default:
+     {
+         FIXME( "type %d not handled.\n", desc->Type );
+diff --git a/include/ddk/d3dkmthk.h b/include/ddk/d3dkmthk.h
+index c067f477..c22d33fe 100755
+--- a/include/ddk/d3dkmthk.h
++++ b/include/ddk/d3dkmthk.h
+@@ -149,6 +149,22 @@ typedef struct _D3DKMT_CHECKVIDPNEXCLUSIVEOWNERSHIP
+     D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId;
+ } D3DKMT_CHECKVIDPNEXCLUSIVEOWNERSHIP;
+ 
++typedef struct _D3DKMT_WDDM_2_7_CAPS
++{
++    union
++    {
++        struct
++        {
++            UINT HwSchSupported               :  1;
++            UINT HwSchEnabled                 :  1;
++            UINT HwSchEnabledByDefault        :  1;
++            UINT IndependentVidPnVSyncControl :  1;
++            UINT Reserved                     : 28;
++        };
++        UINT Value;
++    };
++} D3DKMT_WDDM_2_7_CAPS;
++
+ #define D3DKMT_QUERYSTATISTICS_SEGMENT_PREFERENCE_MAX 5
+ 
+ typedef struct _D3DKMT_CLOSEADAPTER
+-- 
+2.51.0
+
