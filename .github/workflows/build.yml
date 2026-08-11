@@ -24,12 +24,31 @@ on:
 # incomparable, which is how a deployment mistake got misread for days as the
 # base having moved underneath us. the nixpkgs rev is a branch tip captured on
 # 2026-08-03, for the same reason: a branch ref moves, so the runtime's
-# freetype, gnutls and moltenvk would change without a commit here saying so.
+# freetype and gnutls would change without a commit here saying so.
+#
+# moltenvk comes from khronos' own release rather than nixpkgs, which is where
+# dxvk and dxmt already come from and for the same reason: it tracks the GPU,
+# not the base system, and it needs to move on its own schedule. nixpkgs is a
+# release behind (1.4.1 on 26.05-darwin, 1.2.11 on the pin above), and 1.4.2 is
+# the first build that knows about apple10 (M5).
+#
+# nixpkgs could not have supplied it anyway. nixpkgs 26.11 dropped
+# x86_64-darwin outright and evaluating legacyPackages.x86_64-darwin there is a
+# hard error, so unstable is unusable for this workflow entirely -- every
+# package here is x86_64-darwin. the 26.05-darwin branch keeps it until the end
+# of 2026, which is this project's deadline for finding another source of
+# x86_64 macOS libraries.
 env:
   WINECX_COMMIT: aa5ddd8eae4d785a95a6199f17e9deed6625f07f
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
+  MOLTENVK_VERSION: "1.4.2"
   DXVK_VERSION: "1.10.3"
   DXMT_VERSION: "0.80"
+  # the runtime stream this build publishes into. lived inline in the stamping
+  # step as a default and went stale there: v4.2.0 shipped while the workflow
+  # still said 4.1.0, so every dispatch without an explicit input mislabelled
+  # itself. it belongs next to the other pins, where it gets read.
+  RUNTIME_VERSION: "4.3.0"
   # Without this every binary carries the minos of whatever built it, so the
   # self-hosted runner stamped macOS 27 onto a runtime dyld then refuses to load
   # anywhere older. Whisky's own floor has to match this number.
@@ -157,7 +176,7 @@ jobs:
           # here reads nixpkgs' propagated-build-inputs, so without them the
           # gstreamer probe fails on a missing glib-2.0 and configure quietly
           # drops winegstreamer
-          for p in freetype gnutls libpng zlib brotli bzip2 nettle libtasn1 libidn2 p11-kit libunistring gmp moltenvk vulkan-headers ffmpeg-headless \
+          for p in freetype gnutls libpng zlib brotli bzip2 nettle libtasn1 libidn2 p11-kit libunistring gmp vulkan-headers ffmpeg-headless \
                    glib orc \
                    gst_all_1.gstreamer gst_all_1.gst-plugins-base gst_all_1.gst-plugins-good \
                    gst_all_1.gst-plugins-bad gst_all_1.gst-libav; do
@@ -401,6 +420,20 @@ jobs:
                 dxmt.tar.gz 8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d
           tar -xzf dxvk.tar.gz -C payload
           tar -xzf dxmt.tar.gz -C payload
+
+          # khronos' own build, not nixpkgs': see the note by MOLTENVK_VERSION.
+          # the plain macos tar, not -privateapi -- that variant's extra
+          # features are AMD-only and it reaches into unsupported Metal SPI for
+          # them, which is not a trade worth making on apple silicon.
+          fetch "https://github.com/KhronosGroup/MoltenVK/releases/download/v$MOLTENVK_VERSION/MoltenVK-macos.tar" \
+                moltenvk.tar f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e
+          tar -xf moltenvk.tar -C payload MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
+          # ships universal; the rest of Wine/lib and the wine binary itself are
+          # x86_64, so thin it to match rather than carry an arm64 slice nothing
+          # in this runtime can load
+          lipo -thin x86_64 payload/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib \
+               -output payload/libMoltenVK.dylib
+          lipo -archs payload/libMoltenVK.dylib
           ls payload
 
       - name: install and package
@@ -489,7 +522,7 @@ jobs:
           scan() { otool -L "$1" 2>/dev/null | awk '/\/nix\/store/{print $1}'; }
 
           # two kinds of dependency, and only one of them is discoverable.
-          # freetype, gnutls and MoltenVK are dlopened by soname so they never
+          # freetype and gnutls are dlopened by soname so they never
           # appear in a load command: they have to be named. everything the
           # unix modules link against directly (ffmpeg, and whatever it drags
           # in) does appear, so seed from the tree itself rather than from a
@@ -510,9 +543,20 @@ jobs:
           done
           echo "gstreamer plugins: $(ls "$LIBDIR/gstreamer-1.0" | wc -l | tr -d ' ')"
 
+          # MoltenVK is the one dlopened library that no longer comes out of the
+          # nix closure, so it is placed by hand. it needs no closure walk: its
+          # only dependencies are system frameworks and libc++, nothing in
+          # /nix/store. fixup() below still gives it a @loader_path id and an
+          # ad-hoc signature along with everything else in LIBDIR.
+          [ -f payload/libMoltenVK.dylib ] || {
+            echo "::error::no libMoltenVK.dylib in payload, the fetch step did not run"; exit 1; }
+          cp payload/libMoltenVK.dylib "$LIBDIR/libMoltenVK.dylib"
+          chmod u+w "$LIBDIR/libMoltenVK.dylib"
+          echo "moltenvk: $MOLTENVK_VERSION $(lipo -archs "$LIBDIR/libMoltenVK.dylib")"
+
           queue=""
           for d in $(cat store-outs.txt); do
-            for so in libfreetype.6.dylib libgnutls.30.dylib libMoltenVK.dylib; do
+            for so in libfreetype.6.dylib libgnutls.30.dylib; do
               [ -f "$d/lib/$so" ] && queue="$queue $d/lib/$so"
             done
           done
@@ -635,7 +679,8 @@ jobs:
           # the version was a constant here, so every build stamped 4.0.0 whatever
           # it was published as. the app reads this file, not the release tag, so
           # a mismatch makes it offer the same update forever.
-          rv="${{ inputs.runtime_version || '4.1.0' }}"
+          rv="${{ inputs.runtime_version || '' }}"
+          rv="${rv:-$RUNTIME_VERSION}"
           case "$rv" in
             [0-9]*.[0-9]*.[0-9]*) ;;
             *) echo "::error::runtime_version '$rv' is not major.minor.patch"; exit 1;;
