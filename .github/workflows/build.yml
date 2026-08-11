@@ -9,9 +9,10 @@ on:
         default: standard
         options: [standard, release, fast]
       runtime_version:
-        description: "version stamped into WhiskyWineVersion.plist; must match the release tag it is published under"
+        description: "override the stamped version; leave empty to use RUNTIME_VERSION from the workflow env"
         type: string
-        default: "4.1.0"
+        # deliberately no default: a default here wins over the shell fallback
+        # below, so the version would go stale in two places instead of one
       runner:
         description: "where to build: self-hosted is ~10x faster, hosted is the clean-room check"
         type: choice
