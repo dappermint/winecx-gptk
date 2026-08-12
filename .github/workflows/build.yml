@@ -581,11 +581,11 @@ jobs:
             done
           done
 
-          # two iconvs are needed, and they are not interchangeable: libintl
-          # wants plain _iconv (only macOS's /usr/lib copy exports it) while
-          # libidn2 and libunistring want GNU's _libiconv (only nix's copy has
-          # it). so libintl is pointed at the system library and everything
-          # else keeps the bundled one.
+          # two iconvs are needed and they are not interchangeable: _iconv is
+          # only in macOS's /usr/lib copy, _libiconv only in nix's. ask each
+          # library which it imports rather than naming names -- the name list
+          # this replaces had libintl alone, and missed libglib, which failed
+          # to load and took libgstreamer and every media decoder with it.
           fixup() {
             local f="$1"
             local rel
@@ -601,7 +601,7 @@ jobs:
               *.dylib*) install_name_tool -id "@loader_path/$(basename "$f")" "$f" 2>/dev/null || true ;;
             esac
             for ref in $(scan "$f"); do
-              if [[ "$(basename "$ref")" == libiconv*.dylib && "$(basename "$f")" == libintl* ]]; then
+              if [[ "$(basename "$ref")" == libiconv*.dylib ]] && nm -u "$f" 2>/dev/null | grep -q '^ *_iconv$'; then
                 install_name_tool -change "$ref" "/usr/lib/libiconv.2.dylib" "$f" 2>/dev/null || true
               else
                 install_name_tool -change "$ref" "@loader_path/$rel/$(basename "$ref")" "$f" 2>/dev/null || true
@@ -848,6 +848,22 @@ jobs:
             exit 1
           }
           echo "media foundation: ok"
+
+
+          # the check above runs on the builder, where the /nix/store originals
+          # satisfy anything the bundled copies cannot, so it passed for months
+          # while the shipped libglib could not load at all. load the bundled
+          # files by path instead. x86_64 like the bundle, which is the same
+          # rosetta exposure the smoke tests above already take.
+          clang -arch x86_64 -O2 -o dlopenall tests/dlopenall.c
+          find Libraries/Wine/lib -name '*.dylib*' -o -name '*.so' \
+            | sort | tr '\n' '\0' | xargs -0 ./dlopenall > dlopen.log 2>&1 || true
+          grep '^FAIL' dlopen.log | head -20
+          tail -1 dlopen.log | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -q "RESULT: 0 of" dlopen.log || {
+            echo "::error::bundled libraries do not load; the runtime is broken for anyone without this nix store"
+            exit 1
+          }
 
       - name: package
         run: |
