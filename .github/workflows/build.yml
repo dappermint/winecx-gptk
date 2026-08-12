@@ -514,8 +514,21 @@ jobs:
           phase() { echo "::notice::phase $1: $((SECONDS-_tp))s (total $((SECONDS-_t0))s)"; _tp=$SECONDS; }
 
           cd build
-          make install DESTDIR="$PWD/../staging"
-          phase "make install"
+          # install-lib, not install, and this is where the step's 25 minutes
+          # went. wine's `install` also runs install-dev, whose prerequisite
+          # list is 2181 import libraries -- caught in the act on run
+          # 31650565219, compiling dlls/d3dx9_25 fourteen minutes into a step
+          # that is supposed to be copying files. every one of them was then
+          # thrown away four lines below by the *.a delete. install-lib is
+          # wine's own target for "libraries needed to run applications" and
+          # is what install-image uses; it carries the dlls, the unix .so
+          # modules, the loader, nls and fonts.
+          #
+          # and -j, which install never had, so whatever is left to build now
+          # uses the machine.
+          ncpu=$(sysctl -n hw.logicalcpu)
+          make -j"$ncpu" install-lib DESTDIR="$PWD/../staging"
+          phase "make install-lib"
           mkdir -p "$PWD/../staging/opt/whiskywine/share/wine/mono" "$PWD/../staging/opt/whiskywine/share/wine/gecko"
           cp -R "$PWD/../addons/mono"/* "$PWD/../staging/opt/whiskywine/share/wine/mono/"
           cp -R "$PWD/../addons/gecko"/* "$PWD/../staging/opt/whiskywine/share/wine/gecko/"
@@ -579,6 +592,11 @@ jobs:
           # ~600MB of the tree.
           command -v x86_64-w64-mingw32-strip >/dev/null || {
             echo "::error::x86_64-w64-mingw32-strip not on PATH"; exit 1; }
+          # install-lib does not install these any more, so this should find
+          # nothing. kept as the guard that says so if that ever changes back
+          a=$(find Libraries/Wine/lib/wine/*-windows -name '*.a' | wc -l | tr -d ' ')
+          [ "$a" = 0 ] && echo "import libraries: none installed, as expected" \
+                       || echo "::warning::install-lib brought in $a import libraries, deleting"
           find Libraries/Wine/lib/wine/*-windows -name '*.a' -delete
           # batched: gnu strip prints an error for a non-COFF file (.tlb, .nls)
           # and keeps going with the rest of the batch, unlike llvm-strip which
