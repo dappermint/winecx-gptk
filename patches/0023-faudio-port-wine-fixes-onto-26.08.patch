@@ -9,12 +9,14 @@ that split also left MFAudioFormat_XMAudio2 defined in both halves, which
 only the wma one uses. MSVC tolerates it, mingw defaults to -fno-common
 and fails the link for every xactengine dll, so drop the dead one.
 
-Makefile.in picks up the two sources 26.08 adds.
+Makefile.in picks up FAudioFX_collector.c. crossover 26.3 vendors 25.12
+and already lists FAudio_platform_win32_wmadec.c, so that line is no
+longer ours to add.
 ---
 diff -ruN ./libs/faudio/Makefile.in ../fixed/libs/faudio/Makefile.in
---- a/libs/faudio/Makefile.in	2026-08-12 15:41:41
-+++ b/libs/faudio/Makefile.in	2026-08-12 15:41:57
-@@ -14,10 +14,12 @@
+--- a/libs/faudio/Makefile.in	2026-08-13 03:02:40
++++ b/libs/faudio/Makefile.in	2026-08-13 03:02:49
+@@ -14,6 +14,7 @@
  	src/FAPOFX_masteringlimiter.c \
  	src/FAPOFX_reverb.c \
  	src/FAudio.c \
@@ -22,14 +24,9 @@ diff -ruN ./libs/faudio/Makefile.in ../fixed/libs/faudio/Makefile.in
  	src/FAudioFX_reverb.c \
  	src/FAudioFX_volumemeter.c \
  	src/FAudio_internal.c \
- 	src/FAudio_internal_simd.c \
- 	src/FAudio_operationset.c \
- 	src/FAudio_platform_win32.c \
-+	src/FAudio_platform_win32_wmadec.c \
- 	src/matrix_defaults.inl
 diff -ruN ./libs/faudio/src/FAudio_internal.h ../fixed/libs/faudio/src/FAudio_internal.h
---- a/libs/faudio/src/FAudio_internal.h	2026-08-12 15:41:41
-+++ b/libs/faudio/src/FAudio_internal.h	2026-08-12 15:41:57
+--- a/libs/faudio/src/FAudio_internal.h	2026-08-13 03:02:40
++++ b/libs/faudio/src/FAudio_internal.h	2026-08-13 03:02:49
 @@ -231,6 +231,8 @@
  			#else /* VS2010- */
  				#define restrict
@@ -40,8 +37,8 @@ diff -ruN ./libs/faudio/src/FAudio_internal.h ../fixed/libs/faudio/src/FAudio_in
  	#endif
  #endif
 diff -ruN ./libs/faudio/src/FAudio_platform_win32.c ../fixed/libs/faudio/src/FAudio_platform_win32.c
---- a/libs/faudio/src/FAudio_platform_win32.c	2026-08-12 15:41:41
-+++ b/libs/faudio/src/FAudio_platform_win32.c	2026-08-12 16:03:39
+--- a/libs/faudio/src/FAudio_platform_win32.c	2026-08-13 03:02:40
++++ b/libs/faudio/src/FAudio_platform_win32.c	2026-08-13 03:02:49
 @@ -43,15 +43,7 @@
  #define _SPEAKER_POSITIONS_ /* Defined by SDK. */
  #include "FAudio_internal.h"
@@ -77,8 +74,8 @@ diff -ruN ./libs/faudio/src/FAudio_platform_win32.c ../fixed/libs/faudio/src/FAu
  	HRESULT hr;
  	WCHAR filename_w[MAX_PATH];
 diff -ruN ./libs/faudio/src/FAudio_platform_win32_wmadec.c ../fixed/libs/faudio/src/FAudio_platform_win32_wmadec.c
---- a/libs/faudio/src/FAudio_platform_win32_wmadec.c	2026-08-12 15:41:41
-+++ b/libs/faudio/src/FAudio_platform_win32_wmadec.c	2026-08-12 15:41:57
+--- a/libs/faudio/src/FAudio_platform_win32_wmadec.c	2026-08-13 03:02:40
++++ b/libs/faudio/src/FAudio_platform_win32_wmadec.c	2026-08-13 03:02:49
 @@ -56,7 +56,7 @@
  
  	copy_size = (DWORD)min(buffer->AudioBytes - impl->input_pos, impl->input_size);

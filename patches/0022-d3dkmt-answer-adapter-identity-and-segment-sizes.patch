@@ -1,4 +1,7 @@
-win32u: answer the adapter identity and segment size queries
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: millia ampora <198710911+dappermint@users.noreply.github.com>
+Date: Thu, 13 Aug 2026 03:01:19 +0400
+Subject: 0022-d3dkmt-answer-adapter-identity-and-segment-sizes
 
 Five more KMTQAITYPEs, all of which this stack can answer honestly. None are
 upstream or Proton; the payload layouts come from the DDK reference for
@@ -17,38 +20,42 @@ d3dkmthk.h, which is also where the struct definitions are from.
                          which MoltenVK does not implement.
   ADAPTERGUID            the Vulkan deviceUUID, the same 16 bytes
                          get_vulkan_physical_device already matches adapters on
-                         and d3dkmt_get_vulkan_gpus already copies into the GPU
-                         list, so an app that pairs this against either sees one
+                         and get_vulkan_gpus already copies into the GPU list,
+                         so an app that pairs this against either sees one
                          consistent identity.
   GETSEGMENTSIZE         Vulkan heap sizes, device-local into
                          DedicatedVideoMemorySize and the rest into
                          SharedSystemMemorySize, the same split
-                         NtGdiDdDDIQueryVideoMemoryInfo makes three functions
+                         NtGdiDdDDIQueryVideoMemoryInfo makes two functions
                          down. DedicatedSystemMemorySize stays 0: there is no
                          carve-out of system memory here, it is one unified pool.
 
-The last two are gated on adapter->vk_device and fail with
-STATUS_INVALID_PARAMETER without it, which is not the vestigial guard that got
-removed from the 2.7 caps case in the previous patch. These two genuinely read
-the physical device, and NtGdiDdDDIOpenAdapterFromLuid hands out adapters with a
-null vk_device whenever the LUID matched nothing, so the guard is load-bearing.
+The block goes above CW HACK 24905 rather than below it. That case falls
+through to default when the backend is not d3dmetal, so anything inserted
+directly after it silently becomes the 2.7 caps answer for every other backend.
 
-Deliberately still STATUS_NOT_IMPLEMENTED: the WDDM 1.2 / 1.3 / 2.0 / 2.9 / 3.0
-/ 3.1 caps blocks and QUERYREGISTRY. Every one of the caps blocks would answer
-all-zero the way 2.7 does, so the only thing they need is a struct of exactly
-the right size, and getting that wrong fails in both directions: too small and
-the caller reads an uninitialised tail, too large and the size check rejects a
-valid call. D3DKMT_WDDM_1_2_CAPS alone pulls D3DKMDT_PREEMPTION_CAPS and two
-granularity enums out of d3dkmdt.h, a header this tree does not carry at all.
-Not worth porting until something asks for them; tests/qaiprobe.c reports which
+The last two are gated on adapter->physical_device and fail with
+STATUS_INVALID_PARAMETER without it. NtGdiDdDDIOpenAdapterFromLuid hands out
+adapters with a null physical_device whenever the LUID matched nothing, so the
+guard is load-bearing. get_d3dkmt_object takes d3dkmt_lock itself and the vk
+call is made outside it, which is what NtGdiDdDDIQueryVideoMemoryInfo does.
+
+Only four structs are added here. Wine 11 carries include/d3dkmdt.h, which
+this tree did not have before, and it defines every WDDM caps block from 1.2
+through 3.1. Those cases are still STATUS_NOT_IMPLEMENTED, but the structs no
+longer have to be hand-written to add them; tests/qaiprobe.c reports which
 types actually get asked.
+---
+ dlls/win32u/d3dkmt.c   | 77 ++++++++++++++++++++++++++++++++++++++++++
+ include/ddk/d3dkmthk.h | 47 ++++++++++++++++++++++++++
+ 2 files changed, 124 insertions(+)
 
-diff --git i/dlls/win32u/d3dkmt.c w/dlls/win32u/d3dkmt.c
-index a7f7a647..f8e1c4ba 100644
---- i/dlls/win32u/d3dkmt.c
-+++ w/dlls/win32u/d3dkmt.c
-@@ -370,6 +370,91 @@ NTSTATUS WINAPI NtGdiDdDDIQueryAdapterInfo( D3DKMT_QUERYADAPTERINFO *desc )
-         memset( value, 0, sizeof(*value) );
+diff --git a/dlls/win32u/d3dkmt.c b/dlls/win32u/d3dkmt.c
+index f7694eb6..223bbfd6 100644
+--- a/dlls/win32u/d3dkmt.c
++++ b/dlls/win32u/d3dkmt.c
+@@ -712,6 +712,83 @@ NTSTATUS WINAPI NtGdiDdDDIQueryAdapterInfo( D3DKMT_QUERYADAPTERINFO *desc )
+         *value = KMT_DRIVERVERSION_WDDM_1_3;
          return STATUS_SUCCESS;
      }
 +    case KMTQAITYPE_ADAPTERTYPE:
@@ -88,61 +95,53 @@ index a7f7a647..f8e1c4ba 100644
 +    {
 +        VkPhysicalDeviceIDProperties id = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
 +        VkPhysicalDeviceProperties2 properties2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &id};
-+        NTSTATUS status = STATUS_INVALID_PARAMETER;
++        struct vulkan_physical_device *physical_device;
 +        GUID *value = desc->pPrivateDriverData;
 +        struct d3dkmt_adapter *adapter;
 +
 +        if (desc->PrivateDriverDataSize < sizeof(*value))
 +            return STATUS_INVALID_PARAMETER;
 +
-+        pthread_mutex_lock( &d3dkmt_lock );
-+        if ((adapter = find_adapter_from_handle( desc->hAdapter )) && adapter->vk_device)
-+        {
-+            pvkGetPhysicalDeviceProperties2KHR( adapter->vk_device, &properties2 );
-+            memcpy( value, id.deviceUUID, sizeof(*value) );
-+            status = STATUS_SUCCESS;
-+        }
-+        pthread_mutex_unlock( &d3dkmt_lock );
++        if (!(adapter = get_d3dkmt_object( desc->hAdapter, D3DKMT_ADAPTER ))) return STATUS_INVALID_PARAMETER;
++        if (!(physical_device = adapter->physical_device)) return STATUS_INVALID_PARAMETER;
 +
-+        return status;
++        physical_device->instance->p_vkGetPhysicalDeviceProperties2KHR( physical_device->host.physical_device, &properties2 );
++        memcpy( value, id.deviceUUID, sizeof(*value) );
++        return STATUS_SUCCESS;
 +    }
 +    case KMTQAITYPE_GETSEGMENTSIZE:
 +    {
 +        VkPhysicalDeviceMemoryProperties2 properties2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
 +        D3DKMT_SEGMENTSIZEINFO *value = desc->pPrivateDriverData;
-+        NTSTATUS status = STATUS_INVALID_PARAMETER;
++        struct vulkan_physical_device *physical_device;
 +        struct d3dkmt_adapter *adapter;
 +        unsigned int i;
 +
 +        if (desc->PrivateDriverDataSize < sizeof(*value))
 +            return STATUS_INVALID_PARAMETER;
 +
++        if (!(adapter = get_d3dkmt_object( desc->hAdapter, D3DKMT_ADAPTER ))) return STATUS_INVALID_PARAMETER;
++        if (!(physical_device = adapter->physical_device)) return STATUS_INVALID_PARAMETER;
++
 +        memset( value, 0, sizeof(*value) );
 +
-+        pthread_mutex_lock( &d3dkmt_lock );
-+        if ((adapter = find_adapter_from_handle( desc->hAdapter )) && adapter->vk_device)
++        physical_device->instance->p_vkGetPhysicalDeviceMemoryProperties2KHR( physical_device->host.physical_device, &properties2 );
++        for (i = 0; i < properties2.memoryProperties.memoryHeapCount; ++i)
 +        {
-+            pvkGetPhysicalDeviceMemoryProperties2KHR( adapter->vk_device, &properties2 );
-+            for (i = 0; i < properties2.memoryProperties.memoryHeapCount; ++i)
-+            {
-+                if (properties2.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
-+                    value->DedicatedVideoMemorySize += properties2.memoryProperties.memoryHeaps[i].size;
-+                else
-+                    value->SharedSystemMemorySize += properties2.memoryProperties.memoryHeaps[i].size;
-+            }
-+            status = STATUS_SUCCESS;
++            if (properties2.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
++                value->DedicatedVideoMemorySize += properties2.memoryProperties.memoryHeaps[i].size;
++            else
++                value->SharedSystemMemorySize += properties2.memoryProperties.memoryHeaps[i].size;
 +        }
-+        pthread_mutex_unlock( &d3dkmt_lock );
-+
-+        return status;
++        return STATUS_SUCCESS;
 +    }
-     default:
+     /* CW HACK 24905 */
+     case KMTQAITYPE_WDDM_2_7_CAPS:
      {
-         FIXME( "type %d not handled.\n", desc->Type );
-diff --git i/include/ddk/d3dkmthk.h w/include/ddk/d3dkmthk.h
-index 53b0f016..5a3f4c2d 100644
---- i/include/ddk/d3dkmthk.h
-+++ w/include/ddk/d3dkmthk.h
+diff --git a/include/ddk/d3dkmthk.h b/include/ddk/d3dkmthk.h
+index a4da022e..442379b3 100644
+--- a/include/ddk/d3dkmthk.h
++++ b/include/ddk/d3dkmthk.h
 @@ -149,6 +149,53 @@ typedef struct _D3DKMT_CHECKVIDPNEXCLUSIVEOWNERSHIP
      D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId;
  } D3DKMT_CHECKVIDPNEXCLUSIVEOWNERSHIP;
@@ -194,6 +193,6 @@ index 53b0f016..5a3f4c2d 100644
 +    } DUMMYUNIONNAME;
 +} D3DKMT_ADAPTERTYPE;
 +
- typedef struct _D3DKMT_WDDM_2_7_CAPS
- {
-     union
+ #define D3DKMT_QUERYSTATISTICS_SEGMENT_PREFERENCE_MAX 5
+ 
+ typedef struct _D3DKMT_CLOSEADAPTER
