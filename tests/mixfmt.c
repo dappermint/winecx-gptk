@@ -11,6 +11,8 @@
 #include <initguid.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <functiondiscoverykeys_devpkey.h>
+#include <dsound.h>
 #include <stdio.h>
 
 static const struct { DWORD bit; const char *name; } SPEAKERS[] = {
@@ -59,6 +61,45 @@ int main(void)
                                             : "no centre channel");
     } else {
         printf("RESULT: plain %u-channel format, no channel mask\n", fmt->nChannels);
+    }
+
+    /* the endpoint property a game reads when it wants the speaker layout
+     * rather than the stream format */
+    IPropertyStore *props = NULL;
+    if (SUCCEEDED(IMMDevice_OpenPropertyStore(dev, STGM_READ, &props))) {
+        PROPVARIANT v;
+        PropVariantInit(&v);
+        if (SUCCEEDED(IPropertyStore_GetValue(props, &PKEY_AudioEndpoint_PhysicalSpeakers, &v))
+            && v.vt == VT_UI4) {
+            printf("[phys] PhysicalSpeakers=0x%08lx:", (unsigned long)v.ulVal);
+            for (unsigned i = 0; i < ARRAYSIZE(SPEAKERS); i++)
+                if (v.ulVal & SPEAKERS[i].bit) printf(" %s", SPEAKERS[i].name);
+            printf("\n");
+        } else {
+            printf("[phys] PhysicalSpeakers not set\n");
+        }
+        PropVariantClear(&v);
+        IPropertyStore_Release(props);
+    }
+
+    /* and what DirectSound claims, which is a separate answer entirely */
+    IDirectSound8 *ds = NULL;
+    if (SUCCEEDED(CoCreateInstance(&CLSID_DirectSound8, NULL, CLSCTX_INPROC_SERVER,
+                                   &IID_IDirectSound8, (void **)&ds))
+        && SUCCEEDED(IDirectSound8_Initialize(ds, NULL))) {
+        DWORD cfg = 0;
+        if (SUCCEEDED(IDirectSound8_GetSpeakerConfig(ds, &cfg))) {
+            static const char *names[] = { "?", "HEADPHONE", "MONO", "QUAD",
+                                           "STEREO", "SURROUND", "5POINT1_BACK",
+                                           "7POINT1_WIDE", "7POINT1_SURROUND",
+                                           "5POINT1_SURROUND" };
+            DWORD c = DSSPEAKER_CONFIG(cfg);
+            printf("[dsnd] GetSpeakerConfig=0x%08lx (%s)\n", (unsigned long)cfg,
+                   c < ARRAYSIZE(names) ? names[c] : "?");
+        }
+        IDirectSound8_Release(ds);
+    } else {
+        printf("[dsnd] could not initialise DirectSound\n");
     }
 
     CoTaskMemFree(fmt);
