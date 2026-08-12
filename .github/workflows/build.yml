@@ -431,10 +431,21 @@ jobs:
           set -eu
           mono_ver=$(sed -n 's/^#define MONO_VERSION "\(.*\)"/\1/p' winecx/dlls/appwiz.cpl/addons.c)
           gecko_ver=$(sed -n 's/^#define GECKO_VERSION "\(.*\)"/\1/p' winecx/dlls/appwiz.cpl/addons.c)
-          [ "$mono_ver" = "9.4.0" ] && [ "$gecko_ver" = "2.47.4" ] || {
-            echo "winecx now wants mono $mono_ver, gecko $gecko_ver; update the pinned hashes"
-            exit 1
-          }
+
+          # a hash has to be pinned for whatever version winecx asks for, so
+          # unknown versions still fail. keeping both bases in the table lets
+          # the wine 10 and wine 11 branches share this file.
+          case "$mono_ver" in
+            9.4.0)  mono_sha=fd772219aacf46b825fa891a647af4a9ddf8439320101c231918b2037bf13858 ;;
+            10.4.1) mono_sha=a16606ef0724202e6a6848ece6e0cbba64d11e2f11aefe744af1d93c6d9f99bb ;;
+            *) echo "no pinned hash for mono $mono_ver"; exit 1 ;;
+          esac
+          case "$gecko_ver" in
+            2.47.4) gecko_x86_sha=2cfc8d5c948602e21eff8a78613e1826f2d033df9672cace87fed56e8310afb6
+                    gecko_x64_sha=fd88fc7e537d058d7a8abf0c1ebc90c574892a466de86706a26d254710a82814 ;;
+            *) echo "no pinned hashes for gecko $gecko_ver"; exit 1 ;;
+          esac
+          echo "mono $mono_ver, gecko $gecko_ver"
 
           fetch() {
             curl -fsSL -o "$2" "$1"
@@ -444,11 +455,11 @@ jobs:
 
           mkdir -p addons/mono addons/gecko
           fetch "https://dl.winehq.org/wine/wine-mono/$mono_ver/wine-mono-$mono_ver-x86.tar.xz" \
-                mono.tar.xz fd772219aacf46b825fa891a647af4a9ddf8439320101c231918b2037bf13858
+                mono.tar.xz "$mono_sha"
           fetch "https://dl.winehq.org/wine/wine-gecko/$gecko_ver/wine-gecko-$gecko_ver-x86.tar.xz" \
-                gecko-x86.tar.xz 2cfc8d5c948602e21eff8a78613e1826f2d033df9672cace87fed56e8310afb6
+                gecko-x86.tar.xz "$gecko_x86_sha"
           fetch "https://dl.winehq.org/wine/wine-gecko/$gecko_ver/wine-gecko-$gecko_ver-x86_64.tar.xz" \
-                gecko-x64.tar.xz fd88fc7e537d058d7a8abf0c1ebc90c574892a466de86706a26d254710a82814
+                gecko-x64.tar.xz "$gecko_x64_sha"
 
           tar -xJf mono.tar.xz -C addons/mono
           tar -xJf gecko-x86.tar.xz -C addons/gecko
@@ -800,13 +811,16 @@ jobs:
           }
 
           # the extracted addons the stock engine also ships. without them a new
-          # prefix stops on a modal wine-mono dialog and waits for a click
-          for d in share/wine/mono/wine-mono-9.4.0 \
-                   share/wine/gecko/wine-gecko-2.47.4-x86 \
-                   share/wine/gecko/wine-gecko-2.47.4-x86_64; do
-            [ -d "Libraries/Wine/$d" ] || { echo "::error::missing $d"; exit 1; }
+          # prefix stops on a modal wine-mono dialog and waits for a click.
+          # globbed rather than pinned: which versions to fetch is already
+          # decided by winecx's addons.c, and asserting them twice means every
+          # bump breaks here too
+          for d in Libraries/Wine/share/wine/mono/wine-mono-* \
+                   Libraries/Wine/share/wine/gecko/wine-gecko-*-x86 \
+                   Libraries/Wine/share/wine/gecko/wine-gecko-*-x86_64; do
+            [ -d "$d" ] || { echo "::error::missing $d"; exit 1; }
+            echo "addons: $(basename "$d")"
           done
-          echo "addons: ok"
 
           # without a d3d11 implementation steam paints nothing: wined3d goes
           # through apple's opengl, frozen at 4.1, and ANGLE reports feature
