@@ -40,7 +40,11 @@ on:
 # of 2026, which is this project's deadline for finding another source of
 # x86_64 macOS libraries.
 env:
-  WINECX_COMMIT: aa5ddd8eae4d785a95a6199f17e9deed6625f07f
+  # crossover 26.3.0, wine 11.0. phoenicis stops at 25.1.0 and has not
+  # mirrored 26.x, so this is our own import of codeweavers' source drop,
+  # committed on top of their 25.1.0 tag so the releases still diff.
+  WINECX_REPO: https://github.com/dappermint/winecx.git
+  WINECX_COMMIT: 40c09507dc9f767b234015b0ac50173795f978fc
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
   MOLTENVK_VERSION: "1.4.2"
   FAUDIO_VERSION: "26.08"
@@ -128,7 +132,7 @@ jobs:
 
       - name: clone winecx
         run: |
-          git clone https://github.com/PhoenicisOrg/winecx.git winecx
+          git clone "$WINECX_REPO" winecx
           git -C winecx checkout --detach "$WINECX_COMMIT"
           git -C winecx --no-pager log -1 --oneline
 
