@@ -1,5 +1,15 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: millia ampora <198710911+dappermint@users.noreply.github.com>
+Date: Thu, 13 Aug 2026 01:24:32 +0400
+Subject: [PATCH] 0001-ntdll-foreign-personality-routine
+
+---
+ dlls/ntdll/signal_x86_64.c | 2 +-
+ dlls/ntdll/unwind.c        | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
 diff --git a/dlls/ntdll/signal_x86_64.c b/dlls/ntdll/signal_x86_64.c
-index 7320aea..fe80a46 100644
+index a5bbbaea..cb199188 100644
 --- a/dlls/ntdll/signal_x86_64.c
 +++ b/dlls/ntdll/signal_x86_64.c
 @@ -100,7 +100,7 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
@@ -12,10 +22,10 @@ index 7320aea..fe80a46 100644
  
      dispatch->ImageBase = 0;
 diff --git a/dlls/ntdll/unwind.c b/dlls/ntdll/unwind.c
-index c11bd9d..c2c950f 100644
+index 6e2b8641..237a2266 100644
 --- a/dlls/ntdll/unwind.c
 +++ b/dlls/ntdll/unwind.c
-@@ -2046,7 +2046,7 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
+@@ -2072,7 +2072,7 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
      {
          context->Rip = *(ULONG64 *)context->Rsp;
          context->Rsp += sizeof(ULONG64);

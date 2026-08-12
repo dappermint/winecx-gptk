@@ -1,19 +1,14 @@
-winegstreamer: find the plugins inside the runtime tree
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: millia ampora <198710911+dappermint@users.noreply.github.com>
+Date: Thu, 13 Aug 2026 01:24:33 +0400
+Subject: [PATCH] 0018-winegstreamer-find-plugins-in-the-runtime-tree
 
-GStreamer's plugin search path is baked in at build time and points at the
-builder's prefix, which on this runtime is a /nix/store path that exists on
-nothing but the CI runner. The plugins ship inside the tarball instead, at
-Wine/lib/gstreamer-1.0, and nothing told GStreamer to look there: gst_init
-succeeds, the registry comes up empty, and every decoder lookup fails with
-nothing that names the cause.
-
-Resolve the directory from this module's own path, the same way the unix
-modules already find their bundled dylibs through @loader_path, and publish it
-before gst_init_check. setenv without overwrite, so anyone who sets
-GST_PLUGIN_SYSTEM_PATH_1_0 themselves still wins.
+---
+ dlls/winegstreamer/unixlib.c | 37 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
 
 diff --git a/dlls/winegstreamer/unixlib.c b/dlls/winegstreamer/unixlib.c
-index 729008e1..37d2cd2b 100644
+index 354a7ba7..d71bbfab 100644
 --- a/dlls/winegstreamer/unixlib.c
 +++ b/dlls/winegstreamer/unixlib.c
 @@ -25,8 +25,11 @@

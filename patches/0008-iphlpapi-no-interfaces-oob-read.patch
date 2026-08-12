@@ -1,20 +1,14 @@
-Backport of wine 4781a7128e53b0af05114bc4d37bff3793a200fe
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: millia ampora <198710911+dappermint@users.noreply.github.com>
+Date: Thu, 13 Aug 2026 01:24:33 +0400
+Subject: [PATCH] 0008-iphlpapi-no-interfaces-oob-read
 
-From 4781a7128e53b0af05114bc4d37bff3793a200fe Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?Micha=C5=82=20Durak?=
- <24462-mdurak@users.noreply.gitlab.winehq.org>
-Date: Fri, 10 Apr 2026 20:19:27 +0200
-Subject: [PATCH] iphlpapi: Avoid out-of-bounds read if no network interfaces
- are present.
-
-If *count was zero, aa would end up pointing to a zero-size allocation,
-leading to out-of-bounds access in unicast_addresses_alloc().
 ---
  dlls/iphlpapi/iphlpapi_main.c | 8 +++++++-
  1 file changed, 7 insertions(+), 1 deletion(-)
 
 diff --git a/dlls/iphlpapi/iphlpapi_main.c b/dlls/iphlpapi/iphlpapi_main.c
-index fe2de41c4a..b315490b1f 100644
+index 7b37c1e4..382699e5 100644
 --- a/dlls/iphlpapi/iphlpapi_main.c
 +++ b/dlls/iphlpapi/iphlpapi_main.c
 @@ -1248,7 +1248,7 @@ static DWORD dns_info_alloc( IP_ADAPTER_ADDRESSES *aa, ULONG family, ULONG flags

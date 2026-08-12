@@ -1,5 +1,14 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: millia ampora <198710911+dappermint@users.noreply.github.com>
+Date: Thu, 13 Aug 2026 01:24:32 +0400
+Subject: [PATCH] 0002-advapi32-real-username
+
+---
+ dlls/advapi32/advapi.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
 diff --git a/dlls/advapi32/advapi.c b/dlls/advapi32/advapi.c
-index 1d36dd4..0babdad 100644
+index 1d36dd47..0babdad1 100644
 --- a/dlls/advapi32/advapi.c
 +++ b/dlls/advapi32/advapi.c
 @@ -48,8 +48,9 @@ BOOL WINAPI GetUserNameA( LPSTR name, LPDWORD size )
