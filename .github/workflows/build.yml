@@ -9,7 +9,7 @@ on:
         default: standard
         options: [standard, release, fast]
       runtime_version:
-        description: "override the stamped version; leave empty to use RUNTIME_VERSION from the workflow env"
+        description: "override the stamped version; leave empty for RUNTIME_SERIES.<commit count>"
         type: string
         # deliberately no default: a default here wins over the shell fallback
         # below, so the version would go stale in two places instead of one
@@ -50,7 +50,10 @@ env:
   # step as a default and went stale there: v4.2.0 shipped while the workflow
   # still said 4.1.0, so every dispatch without an explicit input mislabelled
   # itself. it belongs next to the other pins, where it gets read.
-  RUNTIME_VERSION: "4.3.0"
+  # major.minor only. the patch number is the commit count, so it moves on its
+  # own and two builds of the same tree still stamp the same version. bump this
+  # by hand when a release deserves to be called something new.
+  RUNTIME_SERIES: "4.3"
   # Without this every binary carries the minos of whatever built it, so the
   # self-hosted runner stamped macOS 27 onto a runtime dyld then refuses to load
   # anywhere older. Whisky's own floor has to match this number.
@@ -62,6 +65,9 @@ jobs:
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
+        with:
+          # the patch number is the commit count, and a depth-1 checkout counts 1
+          fetch-depth: 0
 
       - name: ensure rosetta
         run: |
@@ -718,7 +724,7 @@ jobs:
           # it was published as. the app reads this file, not the release tag, so
           # a mismatch makes it offer the same update forever.
           rv="${{ inputs.runtime_version || '' }}"
-          rv="${rv:-$RUNTIME_VERSION}"
+          rv="${rv:-$RUNTIME_SERIES.$(git rev-list --count HEAD)}"
           case "$rv" in
             [0-9]*.[0-9]*.[0-9]*) ;;
             *) echo "::error::runtime_version '$rv' is not major.minor.patch"; exit 1;;
