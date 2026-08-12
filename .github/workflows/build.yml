@@ -43,6 +43,7 @@ env:
   WINECX_COMMIT: aa5ddd8eae4d785a95a6199f17e9deed6625f07f
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
   MOLTENVK_VERSION: "1.4.2"
+  FAUDIO_VERSION: "26.08"
   DXVK_VERSION: "1.10.3"
   DXMT_VERSION: "0.80"
   # the runtime stream this build publishes into. lived inline in the stamping
@@ -124,6 +125,38 @@ jobs:
           git clone https://github.com/PhoenicisOrg/winecx.git winecx
           git -C winecx checkout --detach "$WINECX_COMMIT"
           git -C winecx --no-pager log -1 --oneline
+
+      - name: update vendored faudio
+        run: |
+          # winecx vendors FAudio 24.10 and upstream is on 26.08. wine's own
+          # changes to it are 24 lines of portability, no functional
+          # divergence, so the tree can be replaced wholesale and patch 0023
+          # puts those lines back.
+          #
+          # this does NOT fix the 5.1-into-stereo bug. FAudio still swaps the
+          # requested mastering voice channel count for the device's without
+          # telling the caller, so a game that asks for 5.1 on stereo hardware
+          # has every SetOutputMatrix rejected and loses positional audio.
+          # upstream 26.08 has the same code. the bump is for everything else.
+          want=5547ac583e2cd1caf0496db62a4c9a813dd6832a2e8b51b1efc00e9492704fce
+          curl -fsSL -o faudio.tar.gz \
+            "https://github.com/FNA-XNA/FAudio/archive/refs/tags/$FAUDIO_VERSION.tar.gz"
+          got=$(shasum -a 256 faudio.tar.gz | cut -d' ' -f1)
+          [ "$got" = "$want" ] || { echo "::error::faudio hash $got != $want"; exit 1; }
+          tar -xzf faudio.tar.gz
+          cp "FAudio-$FAUDIO_VERSION"/src/* winecx/libs/faudio/src/
+          cp "FAudio-$FAUDIO_VERSION"/include/* winecx/libs/faudio/include/
+          # wine builds none of these and XNA_Song.c does not compile here
+          rm -f winecx/libs/faudio/src/FAudio_platform_sdl2.c \
+                winecx/libs/faudio/src/FAudio_platform_sdl3.c \
+                winecx/libs/faudio/src/qoa_decoder.h \
+                winecx/libs/faudio/src/XNA_Song.c
+          ver() { grep -oE "FAUDIO_${1}_VERSION[[:space:]]+[0-9]+" \
+                    winecx/libs/faudio/include/FAudio.h | grep -oE '[0-9]+$'; }
+          got="$(ver MAJOR).$(ver MINOR)"
+          want="${FAUDIO_VERSION%%.*}.$((10#${FAUDIO_VERSION##*.}))"
+          [ "$got" = "$want" ] || { echo "::error::faudio headers say $got, not $want"; exit 1; }
+          echo "faudio: $FAUDIO_VERSION"
 
       - name: apply patches
         run: |

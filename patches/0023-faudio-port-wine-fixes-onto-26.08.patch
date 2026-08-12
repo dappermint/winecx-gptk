@@ -1,0 +1,120 @@
+From: dappy <dappymint@gmail.com>
+Subject: [PATCH] faudio: port wine's local fixes onto 26.08
+
+the same four fixes wine carried on 24.10, moved to where the code now
+lives. the wma decoder was split out of FAudio_platform_win32.c into its
+own file in 26.02, so the format specifiers go there.
+
+Makefile.in picks up the two sources 26.08 adds.
+---
+diff -ruN ./libs/faudio/Makefile.in ../fixed/libs/faudio/Makefile.in
+--- a/libs/faudio/Makefile.in	2026-08-12 15:41:41
++++ b/libs/faudio/Makefile.in	2026-08-12 15:41:57
+@@ -14,10 +14,12 @@
+ 	src/FAPOFX_masteringlimiter.c \
+ 	src/FAPOFX_reverb.c \
+ 	src/FAudio.c \
++	src/FAudioFX_collector.c \
+ 	src/FAudioFX_reverb.c \
+ 	src/FAudioFX_volumemeter.c \
+ 	src/FAudio_internal.c \
+ 	src/FAudio_internal_simd.c \
+ 	src/FAudio_operationset.c \
+ 	src/FAudio_platform_win32.c \
++	src/FAudio_platform_win32_wmadec.c \
+ 	src/matrix_defaults.inl
+diff -ruN ./libs/faudio/src/FAudio_internal.h ../fixed/libs/faudio/src/FAudio_internal.h
+--- a/libs/faudio/src/FAudio_internal.h	2026-08-12 15:41:41
++++ b/libs/faudio/src/FAudio_internal.h	2026-08-12 15:41:57
+@@ -231,6 +231,8 @@
+ 			#else /* VS2010- */
+ 				#define restrict
+ 			#endif
++		#else
++			#define restrict
+ 		#endif
+ 	#endif
+ #endif
+diff -ruN ./libs/faudio/src/FAudio_platform_win32.c ../fixed/libs/faudio/src/FAudio_platform_win32.c
+--- a/libs/faudio/src/FAudio_platform_win32.c	2026-08-12 15:41:41
++++ b/libs/faudio/src/FAudio_platform_win32.c	2026-08-12 15:41:57
+@@ -43,13 +43,6 @@
+ #define _SPEAKER_POSITIONS_ /* Defined by SDK. */
+ #include "FAudio_internal.h"
+ 
+-#ifdef _MSC_VER
+-DEFINE_GUID(IID_IAudioClient,         0x1CB9AD4C, 0xDBFA, 0x4c32, 0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2);
+-DEFINE_GUID(IID_IAudioRenderClient,   0xF294ACFC, 0x3146, 0x4483, 0xA7, 0xBF, 0xAD, 0xDC, 0xA7, 0xC2, 0x60, 0xE2);
+-DEFINE_GUID(IID_IMMDeviceEnumerator,  0xA95664D2, 0x9614, 0x4F35, 0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6);
+-DEFINE_GUID(CLSID_MMDeviceEnumerator, 0xBCDE0395, 0xE52F, 0x467C, 0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E);
+-#endif
+-
+ DEFINE_MEDIATYPE_GUID(MFAudioFormat_XMAudio2, FAUDIO_FORMAT_XMAUDIO2);
+ 
+ static CRITICAL_SECTION faudio_cs = { NULL, -1, 0, 0, 0, 0 };
+@@ -914,7 +907,7 @@
+ uint8_t* FAudio_memptr(FAudioIOStream *io, size_t offset)
+ {
+ 	struct FAudio_mem *memio = io->data;
+-	return memio->mem + offset;
++	return (uint8_t *)memio->mem + offset;
+ }
+ 
+ void FAudio_close(FAudioIOStream *io)
+@@ -1071,7 +1064,7 @@
+ 	IMFAttributes *attributes = NULL;
+ 	IMFMediaType *media_type = NULL;
+ 	UINT32 channels, samplerate;
+-	UINT64 duration;
++	INT64 duration;
+ 	PROPVARIANT var;
+ 	HRESULT hr;
+ 	WCHAR filename_w[MAX_PATH];
+diff -ruN ./libs/faudio/src/FAudio_platform_win32_wmadec.c ../fixed/libs/faudio/src/FAudio_platform_win32_wmadec.c
+--- a/libs/faudio/src/FAudio_platform_win32_wmadec.c	2026-08-12 15:41:41
++++ b/libs/faudio/src/FAudio_platform_win32_wmadec.c	2026-08-12 15:41:57
+@@ -56,7 +56,7 @@
+ 
+ 	copy_size = (DWORD)min(buffer->AudioBytes - impl->input_pos, impl->input_size);
+ 	if (!copy_size) return S_FALSE;
+-	LOG_INFO(voice->audio, "pushing %x bytes at %x", copy_size, impl->input_pos);
++	LOG_INFO(voice->audio, "pushing %lx bytes at %Ix", copy_size, impl->input_pos);
+ 
+ 	hr = MFCreateSample(&sample);
+ 	FAudio_assert(!FAILED(hr) && "Failed to create sample!");
+@@ -84,7 +84,7 @@
+ 	if (hr == MF_E_NOTACCEPTING) return S_OK;
+ 	if (FAILED(hr))
+ 	{
+-		LOG_ERROR(voice->audio, "IMFTransform_ProcessInput returned %#x", hr);
++		LOG_ERROR(voice->audio, "IMFTransform_ProcessInput returned %#lx", hr);
+ 		return hr;
+ 	}
+ 
+@@ -111,7 +111,7 @@
+ 		if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) return S_FALSE;
+ 		if (FAILED(hr))
+ 		{
+-			LOG_ERROR(voice->audio, "IMFTransform_ProcessInput returned %#x", hr);
++			LOG_ERROR(voice->audio, "IMFTransform_ProcessInput returned %#lx", hr);
+ 			return hr;
+ 		}
+ 
+@@ -143,7 +143,7 @@
+ 		}
+ 		FAudio_memcpy(impl->output_buf + impl->output_pos, copy_buf, copy_size);
+ 		impl->output_pos += copy_size;
+-		LOG_INFO(voice->audio, "pulled %x bytes at %x", copy_size, impl->output_pos);
++		LOG_INFO(voice->audio, "pulled %lx bytes at %Ix", copy_size, impl->output_pos);
+ 		hr = IMFMediaBuffer_Unlock(media_buffer);
+ 		FAudio_assert(!FAILED(hr) && "Failed to unlock buffer bytes!");
+ 
+@@ -232,7 +232,7 @@
+ 	FAudio_zero((char *)dst + copy_size, samples_size - copy_size);
+ 	LOG_INFO(
+ 		voice->audio,
+-		"decoded %x / %x bytes, copied %x / %x bytes",
++		"decoded %Ix / %Ix bytes, copied %Ix / %Ix bytes",
+ 		impl->output_pos,
+ 		impl->output_size,
+ 		copy_size,
