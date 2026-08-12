@@ -606,10 +606,25 @@ jobs:
             | xargs -0 -P "$(sysctl -n hw.logicalcpu)" -n 64 \
                 x86_64-w64-mingw32-strip --strip-debug 2>/dev/null || true
           phase "strip the PE half"
-          # CW HACK 22144: on apple without a preloader the loader expects its
-          # own binary to be named wineloader; whisky expects wine64
-          cp Libraries/Wine/bin/wine Libraries/Wine/bin/wineloader
-          ln -s wine Libraries/Wine/bin/wine64
+          # wine 11 installs the loader beside ntdll.so in lib/wine/<arch>-unix
+          # instead of in bin, and bin now gets only wineserver. that is not
+          # cosmetic: loader/main.c dlopens "ntdll.so" out of its own
+          # realpath'd directory, and ntdll computes the loader back the same
+          # way, as <ntdll_dir>/wine (dlls/ntdll/unix/loader.c). a copy into
+          # bin looks for bin/ntdll.so and dies, measured on the 26.3 tree:
+          #   wine: could not load ntdll.so: dlopen(.../bin/ntdll.so)
+          # symlinks are fine, because realpath resolves them back to the real
+          # directory before the dirname is taken. verified: bin/wine64 through
+          # a symlink prints winecx-26.3.0.
+          #
+          # whisky invokes bin/wine64, so bin still has to offer these names.
+          # CW HACK 22144 wants wineloader among them.
+          loader=Libraries/Wine/lib/wine/x86_64-unix/wine
+          [ -x "$loader" ] || { echo "::error::no loader at $loader"; exit 1; }
+          for n in wine wine64 wineloader; do
+            ln -sf ../lib/wine/x86_64-unix/wine "Libraries/Wine/bin/$n"
+          done
+          ./Libraries/Wine/bin/wine64 --version
 
           # bundle the nix dylib closure flat into Wine/lib and rewrite
           # store references to loader-relative so the tarball is portable
