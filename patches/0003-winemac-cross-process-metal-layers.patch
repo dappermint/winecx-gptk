@@ -4,53 +4,49 @@ Subject: [PATCH] winemac: host cross-process metal layers over CAContext
 A process rendering into another process's window cannot reach that window's
 Cocoa views, so it renders into an offscreen layer tree, publishes it over a
 CAContext, and the owning process hosts it with a CALayerHost. Chromium's gpu
-process renders into exactly such a window, which is why steam's ui needs it.
+process renders into exactly such windows, which is why steam's ui needs this.
 
-Replaces patches 0003, 0013, 0016 and 0017, which were four iterations of this
-against wine 10. Wine 11 fixed half the problem on its own:
-macdrv_client_surface_create now builds a standalone view and no longer needs
-get_win_data(hwnd) to succeed, which was the specific bail-out 0003 existed
-for. So the surface gets created, dxvk and MoltenVK render into it, and every
-old failure signature reads zero.
+Replaces patches 0003, 0013, 0016 and 0017, the wine 10 iterations of the same
+bridge. Wine 11 fixed surface creation on its own (client_surface_create makes
+a standalone view), so half the old work fell away; what wine 11 still lacks is
+everything after creation, and each piece here was found by measuring a live
+steam session on a runtime with the bridge instrumented end to end:
 
-Attachment is what is still missing, and it is why steam was still black on a
-wine 11 runtime built with these held out. Measured 2026-08-13 on 4.3.81: 103
-swapchains created, 57 distinct WineMetalView layers at real geometry
-(1800x988, 1278x657, 690x744, and 700x440 for the login window), and the window
-reading luma 0.0 with one colour at t=270s, well past the ~210s steam takes to
-paint. Correct frames, produced and going nowhere, because
-macdrv_client_surface_update resolves the toplevel through get_win_data and
-returns early when another process owns it.
+- The cross-process branch keys on the client hwnd, not its top level.
+  present() and detach() resolve client.hwnd, so a surface whose own window is
+  out of reach can never be unhidden however reachable its top level is;
+  chromium's gpu process renders into child windows of a browser-owned top
+  level that this process can see.
 
-Hooking client_surface rather than vulkan.c is what makes this one patch
-instead of four: update() runs on every vkQueuePresentKHR, on the thread doing
-the present, which is a wine thread and so may post (0016 was written because
-the old code posted from the cocoa main thread and the post never took effect).
-The same hook serves opengl, vulkan and d3dmetal, where the wine 10 version had
-to touch vulkan.c and d3dmetal.c separately.
+- Hooking client_surface_update serves opengl, vulkan and d3dmetal at once and
+  runs on every present, on a wine thread, which is what makes the create
+  message postable at all (the wine 10 bridge posted from the cocoa main
+  thread once, and the post silently never took effect).
 
-Two things carried over from the wine 10 iterations, both measured then:
-CALayerHost takes its size from the published tree and ignores the frame the
-hosting side sets, so the sender positions the drawable inside a container
-sized to the top level's client area; and the receiving side must size its view
-from user32, because the cached rects are empty for a child window the driver
-never draws.
+- The hosting side mirrors win32 state onto the hosted layers. Chromium keeps
+  a standby surface per window and flips WS_VISIBLE between the two; the
+  standby holds whatever frame it last presented, and stacked by arrival order
+  it sits on top of the live surface showing one stale black frame. That was
+  steam's library page: its content presented thousands of frames, measured,
+  under a dead layer. The create message therefore carries the client hwnd,
+  the owning process keeps ctx -> hwnd, and every WindowPosChanged re-derives
+  hidden state from NtUserIsWindowVisible and zPosition from a front-to-back
+  walk of the descendants, so show/hide flips and reordering land on the
+  hosted trees the same way they land on real windows.
 
-The branch keys on the child hwnd, not on its top level. present() and detach()
-both resolve client.hwnd, so a surface whose own window is out of reach can
-never be unhidden however reachable its top level is. Chromium's gpu process
-renders into a child window owned by the browser process while that window's
-top level is still visible from here, so keying on the top level took the local
-path and stayed black -- measured, first cut of this patch, 148 swapchains and
-7152 present calls on one surface with the window at one colour.
+Two facts carried over from the wine 10 bridge, both measured then: CALayerHost
+takes its size from the published tree, so the sender bakes the child's offset
+into a container sized to the top level's client area; and the receiving view
+is sized from user32, because the cached driver rects are empty for a child
+window the driver never draws.
 
-d3dmetal declines the cross-process case rather than being handed a null view.
-Steam's ui goes through dxvk, so that path is not needed for it.
+d3dmetal declines the cross-process case rather than being handed a null view;
+steam's ui goes through dxvk, so that path is not needed for it.
 ---
-diff --git a/dlls/winemac.drv/cocoa_window.m b/dlls/winemac.drv/cocoa_window.m
-index ffb7c6af..52b01b5a 100644
---- a/dlls/winemac.drv/cocoa_window.m
-+++ b/dlls/winemac.drv/cocoa_window.m
+diff --git i/dlls/winemac.drv/cocoa_window.m w/dlls/winemac.drv/cocoa_window.m
+index ffb7c6af..04d7f3fa 100644
+--- i/dlls/winemac.drv/cocoa_window.m
++++ w/dlls/winemac.drv/cocoa_window.m
 @@ -46,6 +46,25 @@ - (void)_setPreventsActivation:(BOOL)flag;
  
  @end
@@ -102,7 +98,7 @@ index ffb7c6af..52b01b5a 100644
          CGImageRelease(colorImage);
          CGImageRelease(shapeImage);
          [super dealloc];
-@@ -702,6 +725,33 @@ - (WineMetalView*) newMetalViewWithDevice:(id<MTLDevice>)device
+@@ -702,6 +725,44 @@ - (WineMetalView*) newMetalViewWithDevice:(id<MTLDevice>)device
          return _metalView;
      }
  
@@ -126,6 +122,17 @@ index ffb7c6af..52b01b5a 100644
 +        [(WineWindow*)self.window windowDidDrawContent];
 +    }
 +
++    - (void) setCALayerHostState:(CAContextID)contextId hidden:(BOOL)hostHidden zPosition:(CGFloat)zpos
++    {
++        CALayerHost* host = [_caLayerHosts objectForKey:@(contextId)];
++        if (!host) return;
++        [CATransaction begin];
++        [CATransaction setDisableActions:YES];
++        host.hidden = hostHidden;
++        host.zPosition = zpos;
++        [CATransaction commit];
++    }
++
 +    - (void) removeCALayerHostView:(CAContextID)contextId
 +    {
 +        NSNumber* key = @(contextId);
@@ -136,7 +143,7 @@ index ffb7c6af..52b01b5a 100644
      - (void) setLayerRetinaProperties:(BOOL)mode
      {
          [self layer].contentsScale = mode ? 2.0 : 1.0;
-@@ -741,6 +791,9 @@ - (void) setRetinaMode:(BOOL)mode
+@@ -741,6 +802,9 @@ - (void) setRetinaMode:(BOOL)mode
          [self updateGLContexts];
          [self setLayerRetinaProperties:mode];
  
@@ -146,7 +153,7 @@ index ffb7c6af..52b01b5a 100644
          [super setRetinaMode:mode];
      }
  
-@@ -4067,6 +4120,233 @@ void macdrv_view_release_metal_view(macdrv_metal_view v)
+@@ -4067,6 +4131,248 @@ void macdrv_view_release_metal_view(macdrv_metal_view v)
      });
  }
  
@@ -205,6 +212,7 @@ index ffb7c6af..52b01b5a 100644
 +@interface CAContextSwapChain : NSObject <WineMetalSwapChain>
 +{
 +    void* hwnd;
++    void* client_hwnd;
 +    macdrv_metal_device device;
 +    CALayer* container_layer;
 +    CAMetalLayer* offscreen_layer;
@@ -212,19 +220,20 @@ index ffb7c6af..52b01b5a 100644
 +    CAContextID context_id;
 +}
 +
-+- (instancetype) initWithHwnd:(void*)hwnd container:(CGRect)container frame:(CGRect)frame;
++- (instancetype) initWithHwnd:(void*)hwnd client:(void*)client container:(CGRect)container frame:(CGRect)frame;
 +- (void) setContainer:(CGRect)container frame:(CGRect)frame;
 +
 +@end
 +
 +@implementation CAContextSwapChain
 +
-+- (instancetype) initWithHwnd:(void*)newHwnd container:(CGRect)container frame:(CGRect)frame
++- (instancetype) initWithHwnd:(void*)newHwnd client:(void*)newClient container:(CGRect)container frame:(CGRect)frame
 +{
 +    self = [super init];
 +    if (!self) return nil;
 +
 +    hwnd = newHwnd;
++    client_hwnd = newClient;
 +    if (!(device = macdrv_create_metal_device()))
 +    {
 +        [self release];
@@ -273,7 +282,7 @@ index ffb7c6af..52b01b5a 100644
 +        return nil;
 +    }
 +
-+    macdrv_create_remote_layer(hwnd, context_id);
++    macdrv_create_remote_layer(hwnd, client_hwnd, context_id);
 +    return self;
 +}
 +
@@ -323,9 +332,10 @@ index ffb7c6af..52b01b5a 100644
 +    return (macdrv_metal_swapchain)[[MetalViewSwapChain alloc] initWithView:v];
 +}
 +
-+macdrv_metal_swapchain macdrv_create_offscreen_swapchain(void* hwnd, CGRect container, CGRect frame)
++macdrv_metal_swapchain macdrv_create_offscreen_swapchain(void* hwnd, void* client_hwnd, CGRect container, CGRect frame)
 +{
 +    return (macdrv_metal_swapchain)[[CAContextSwapChain alloc] initWithHwnd:hwnd
++                                                                     client:client_hwnd
 +                                                                  container:container
 +                                                                      frame:frame];
 +}
@@ -348,6 +358,8 @@ index ffb7c6af..52b01b5a 100644
 +    [(id<WineMetalSwapChain>)swapchain release];
 +}
 +
++
++
 +/* Hosted on the client view rather than the window's content view, so that the
 + * published tree and the view it lands in share one coordinate space: both are
 + * the top level's client area. */
@@ -362,6 +374,16 @@ index ffb7c6af..52b01b5a 100644
 +            [view addCALayerHostViewWithContextId:context_id];
 +    });
 +}
++}
++
++void macdrv_view_set_ca_layer_host_state(macdrv_view v, unsigned int context_id, int hidden, double zpos)
++{
++    WineContentView* view = (WineContentView*)v;
++
++    OnMainThreadAsync(^{
++        if ([view isKindOfClass:[WineContentView class]])
++            [view setCALayerHostState:context_id hidden:(hidden != 0) zPosition:zpos];
++    });
 +}
 +
 +void macdrv_view_release_ca_layer_host(macdrv_view v, unsigned int context_id)
@@ -380,10 +402,10 @@ index ffb7c6af..52b01b5a 100644
  bool macdrv_get_view_backing_size(macdrv_view v, int backing_size[2])
  {
      WineContentView* view = (WineContentView*)v;
-diff --git a/dlls/winemac.drv/d3dmetal.c b/dlls/winemac.drv/d3dmetal.c
+diff --git i/dlls/winemac.drv/d3dmetal.c w/dlls/winemac.drv/d3dmetal.c
 index b003607c..a5782ed9 100644
---- a/dlls/winemac.drv/d3dmetal.c
-+++ b/dlls/winemac.drv/d3dmetal.c
+--- i/dlls/winemac.drv/d3dmetal.c
++++ w/dlls/winemac.drv/d3dmetal.c
 @@ -119,6 +119,16 @@ static struct d3dmetal_macdrv_win_data *my_get_win_data(HWND hwnd)
          return NULL;
      }
@@ -401,10 +423,10 @@ index b003607c..a5782ed9 100644
      macdrv_set_view_d3dmetal_client_surface(client_surface->cocoa_view, &client_surface->client);
  
      if (!data->d3dmetal_client_surfaces)
-diff --git a/dlls/winemac.drv/macdrv.h b/dlls/winemac.drv/macdrv.h
-index 5735ff78..76d159dc 100644
---- a/dlls/winemac.drv/macdrv.h
-+++ b/dlls/winemac.drv/macdrv.h
+diff --git i/dlls/winemac.drv/macdrv.h w/dlls/winemac.drv/macdrv.h
+index 5735ff78..cd1aa120 100644
+--- i/dlls/winemac.drv/macdrv.h
++++ w/dlls/winemac.drv/macdrv.h
 @@ -100,6 +100,8 @@ static inline RECT rect_from_cgrect(CGRect cgrect)
  {
      WM_MACDRV_SET_WIN_REGION = WM_WINE_FIRST_DRIVER_MSG,
@@ -414,15 +436,17 @@ index 5735ff78..76d159dc 100644
  };
  
  struct macdrv_thread_data
-@@ -184,6 +186,7 @@ extern BOOL macdrv_SystemParametersInfo(UINT action, UINT int_param, void *ptr_p
+@@ -184,6 +186,9 @@ extern BOOL macdrv_SystemParametersInfo(UINT action, UINT int_param, void *ptr_p
      HWND                hwnd;                   /* hwnd that this private data belongs to */
      macdrv_window       cocoa_window;
      macdrv_view         client_view;
 +    macdrv_view         remote_layer_view;  /* hosts layer trees published by other processes */
++    struct remote_layer_entry *remote_layers;   /* which context hosts which child hwnd */
++    unsigned int        remote_layer_count;
      struct window_rects rects;                  /* window rects in monitor DPI, relative to parent client area */
      int                 pixel_format;           /* pixel format for GL */
      HANDLE              drag_event;             /* event to signal that Cocoa-driven window dragging has ended */
-@@ -205,6 +208,12 @@ extern BOOL macdrv_SystemParametersInfo(UINT action, UINT int_param, void *ptr_p
+@@ -205,6 +210,12 @@ extern BOOL macdrv_SystemParametersInfo(UINT action, UINT int_param, void *ptr_p
      macdrv_view           cocoa_view;
      macdrv_metal_device   metal_device;
      macdrv_metal_view     metal_view;
@@ -435,10 +459,24 @@ index 5735ff78..76d159dc 100644
  };
  
  static inline struct macdrv_client_surface *impl_from_client_surface(struct client_surface *client)
-diff --git a/dlls/winemac.drv/macdrv_cocoa.h b/dlls/winemac.drv/macdrv_cocoa.h
-index 477efe9f..ad94a8b2 100644
---- a/dlls/winemac.drv/macdrv_cocoa.h
-+++ b/dlls/winemac.drv/macdrv_cocoa.h
+@@ -214,6 +225,13 @@ extern BOOL macdrv_SystemParametersInfo(UINT action, UINT int_param, void *ptr_p
+ 
+ extern struct macdrv_client_surface *macdrv_client_surface_create(HWND hwnd);
+ 
++struct remote_layer_entry
++{
++    unsigned int ctx;
++    HWND         hwnd;
++};
++
++extern void macdrv_resync_remote_layers(HWND toplevel);
+ extern struct macdrv_win_data *get_win_data(HWND hwnd);
+ extern void release_win_data(struct macdrv_win_data *data);
+ extern void init_win_context(void);
+diff --git i/dlls/winemac.drv/macdrv_cocoa.h w/dlls/winemac.drv/macdrv_cocoa.h
+index 477efe9f..e8a0e377 100644
+--- i/dlls/winemac.drv/macdrv_cocoa.h
++++ w/dlls/winemac.drv/macdrv_cocoa.h
 @@ -122,6 +122,7 @@
  typedef struct macdrv_opaque_metal_device* macdrv_metal_device;
  typedef struct macdrv_opaque_metal_view* macdrv_metal_view;
@@ -447,26 +485,27 @@ index 477efe9f..ad94a8b2 100644
  typedef struct macdrv_opaque_status_item* macdrv_status_item;
  struct macdrv_event;
  struct macdrv_query;
-@@ -559,6 +560,15 @@ extern void macdrv_order_cocoa_window(macdrv_window w, macdrv_window prev,
+@@ -559,6 +560,16 @@ extern void macdrv_order_cocoa_window(macdrv_window w, macdrv_window prev,
  extern macdrv_metal_view macdrv_view_create_metal_view(macdrv_view v, macdrv_metal_device d);
  extern macdrv_metal_layer macdrv_view_get_metal_layer(macdrv_metal_view v);
  extern void macdrv_view_release_metal_view(macdrv_metal_view v);
 +extern macdrv_metal_swapchain macdrv_create_view_swapchain(macdrv_view v);
-+extern macdrv_metal_swapchain macdrv_create_offscreen_swapchain(void* hwnd, CGRect container, CGRect frame);
++extern macdrv_metal_swapchain macdrv_create_offscreen_swapchain(void* hwnd, void* client_hwnd, CGRect container, CGRect frame);
 +extern void macdrv_swapchain_set_frame(macdrv_metal_swapchain swapchain, CGRect container, CGRect frame);
 +extern macdrv_metal_layer macdrv_swapchain_get_layer(macdrv_metal_swapchain swapchain);
 +extern void macdrv_destroy_swapchain(macdrv_metal_swapchain swapchain);
 +extern void macdrv_view_create_ca_layer_host(macdrv_view v, unsigned int context_id);
 +extern void macdrv_view_release_ca_layer_host(macdrv_view v, unsigned int context_id);
-+extern void macdrv_create_remote_layer(void* hwnd, unsigned int context_id);
++extern void macdrv_view_set_ca_layer_host_state(macdrv_view v, unsigned int context_id, int hidden, double zpos);
++extern void macdrv_create_remote_layer(void* hwnd, void* client_hwnd, unsigned int context_id);
 +extern void macdrv_release_remote_layer(void* hwnd, unsigned int context_id);
  extern bool macdrv_get_view_backing_size(macdrv_view v, int backing_size[2]);
  extern void macdrv_set_view_backing_size(macdrv_view v, const int backing_size[2]);
  extern uint32_t macdrv_window_background_color(void);
-diff --git a/dlls/winemac.drv/vulkan.c b/dlls/winemac.drv/vulkan.c
+diff --git i/dlls/winemac.drv/vulkan.c w/dlls/winemac.drv/vulkan.c
 index d146a45e..7af45619 100644
---- a/dlls/winemac.drv/vulkan.c
-+++ b/dlls/winemac.drv/vulkan.c
+--- i/dlls/winemac.drv/vulkan.c
++++ w/dlls/winemac.drv/vulkan.c
 @@ -46,14 +46,26 @@ static const struct vulkan_driver_funcs macdrv_vulkan_driver_funcs;
  static VkResult macdrv_vulkan_surface_create(HWND hwnd, const struct vulkan_instance *instance, VkSurfaceKHR *handle,
                                               struct client_surface **client)
@@ -515,10 +554,10 @@ index d146a45e..7af45619 100644
  
          res = instance->p_vkCreateMacOSSurfaceMVK(instance->host.instance, &create_info_host, NULL /* allocator */, handle);
      }
-diff --git a/dlls/winemac.drv/window.c b/dlls/winemac.drv/window.c
-index 741f7fda..938c552f 100644
---- a/dlls/winemac.drv/window.c
-+++ b/dlls/winemac.drv/window.c
+diff --git i/dlls/winemac.drv/window.c w/dlls/winemac.drv/window.c
+index 741f7fda..e28c1fd4 100644
+--- i/dlls/winemac.drv/window.c
++++ w/dlls/winemac.drv/window.c
 @@ -1146,6 +1146,7 @@ static void macdrv_client_surface_destroy(struct client_surface *client)
  
      TRACE("%s\n", debugstr_client_surface(client));
@@ -594,7 +633,7 @@ index 741f7fda..938c552f 100644
      if (!(data = get_win_data(surface->client.hwnd))) return;
      if (data->client_view != surface->cocoa_view)
      {
-@@ -1219,21 +1259,57 @@ struct macdrv_client_surface *macdrv_client_surface_create(HWND hwnd)
+@@ -1219,21 +1259,58 @@ struct macdrv_client_surface *macdrv_client_surface_create(HWND hwnd)
  {
      HWND toplevel = NtUserGetAncestor(hwnd, GA_ROOT);
      struct macdrv_client_surface *surface;
@@ -609,7 +648,7 @@ index 741f7fda..938c552f 100644
 -    surface = client_surface_create(sizeof(*surface), &macdrv_client_surface_funcs, hwnd);
 -    surface->cocoa_view = macdrv_create_view(cgrect_from_rect(rect));
 -    macdrv_set_view_hidden(surface->cocoa_view, TRUE);
--
+ 
 -    if (surface)
 +    /* the child hwnd, not the toplevel: present() and detach() both resolve
 +     * client.hwnd, so a surface whose own window is out of reach can never be
@@ -646,7 +685,7 @@ index 741f7fda..938c552f 100644
 +        }
 +
 +        surface->remote_toplevel = toplevel;
-+        surface->swapchain = macdrv_create_offscreen_swapchain(toplevel, cgrect_from_rect(container),
++        surface->swapchain = macdrv_create_offscreen_swapchain(toplevel, hwnd, cgrect_from_rect(container),
 +                                                               cgrect_from_rect(frame));
 +        if (!surface->swapchain)
 +        {
@@ -661,12 +700,72 @@ index 741f7fda..938c552f 100644
      return surface;
  }
  
-@@ -1617,6 +1693,41 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+@@ -1335,6 +1412,7 @@ void macdrv_DestroyWindow(HWND hwnd)
+ 
+     /* CW HACK 22435 */
+     if (data->d3dmetal_client_surfaces) CFRelease(data->d3dmetal_client_surfaces);
++    free(data->remote_layers);
+ 
+     CFDictionaryRemoveValue(win_datas, hwnd);
+     release_win_data(data);
+@@ -1598,6 +1676,50 @@ void macdrv_UpdateLayeredWindow(HWND hwnd, BYTE alpha, UINT flags)
+ /**********************************************************************
+  *              WindowMessage   (MACDRV.@)
+  */
++/* Depth-first, front-to-back walk of the descendants: GW_CHILD is the top of
++ * the sibling z-order and GW_HWNDNEXT descends it, so the first host matched
++ * gets the highest zPosition.  A host whose window is not visible is hidden
++ * outright: chromium keeps a standby surface around and flips WS_VISIBLE
++ * between the two, and a stale frame in the standby must not cover the live
++ * one, which is exactly what made steam's library page black. */
++static unsigned int resync_walk(struct macdrv_win_data *data, HWND hwnd, unsigned int next_z)
++{
++    HWND child;
++    unsigned int i;
++
++    for (child = NtUserGetWindowRelative(hwnd, GW_CHILD); child;
++         child = NtUserGetWindowRelative(child, GW_HWNDNEXT))
++    {
++        for (i = 0; i < data->remote_layer_count; i++)
++        {
++            if (data->remote_layers[i].hwnd != child) continue;
++            macdrv_view_set_ca_layer_host_state(data->remote_layer_view, data->remote_layers[i].ctx,
++                                                !NtUserIsWindowVisible(child), (double)next_z);
++            next_z--;
++        }
++        next_z = resync_walk(data, child, next_z);
++    }
++    return next_z;
++}
++
++void macdrv_resync_remote_layers(HWND toplevel)
++{
++    struct macdrv_win_data *data;
++    unsigned int i, z;
++
++    if (!(data = get_win_data(toplevel))) return;
++    if (data->remote_layer_count && data->remote_layer_view)
++    {
++        z = resync_walk(data, toplevel, 1000);
++        /* a host whose hwnd is gone entirely keeps a dead context; hide it */
++        for (i = 0; i < data->remote_layer_count; i++)
++            if (!NtUserIsWindow(data->remote_layers[i].hwnd))
++                macdrv_view_set_ca_layer_host_state(data->remote_layer_view, data->remote_layers[i].ctx, 1, 0.0);
++        (void)z;
++    }
++    release_win_data(data);
++}
++
+ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+ {
+     struct macdrv_win_data *data;
+@@ -1617,6 +1739,67 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
          activate_on_following_focus();
          TRACE("WM_MACDRV_ACTIVATE_ON_FOLLOWING_FOCUS time %u\n", activate_on_focus_time);
          return 0;
 +    case WM_MACDRV_CREATE_REMOTE_LAYER:
-+        if ((data = get_win_data(hwnd)))
++        data = get_win_data(hwnd);
++        if (data)
 +        {
 +            TRACE("WM_MACDRV_CREATE_REMOTE_LAYER context_id %u\n", (unsigned int)lp);
 +            /* client_view belongs to whichever client_surface presented last and
@@ -685,16 +784,41 @@ index 741f7fda..938c552f 100644
 +                data->remote_layer_view = macdrv_create_view(cgrect_from_rect(client));
 +                macdrv_set_view_superview(data->remote_layer_view, data->client_view,
 +                                          data->cocoa_window, NULL, NULL);
++                /* views come out of macdrv_create_view hidden; the local path
++                 * unhides at present(), which never runs for a tree presented
++                 * in another process */
++                macdrv_set_view_hidden(data->remote_layer_view, FALSE);
 +            }
 +            if (data->remote_layer_view)
++            {
++                struct remote_layer_entry *grown = realloc(data->remote_layers,
++                        (data->remote_layer_count + 1) * sizeof(*grown));
++                if (grown)
++                {
++                    grown[data->remote_layer_count].ctx = (unsigned int)lp;
++                    grown[data->remote_layer_count].hwnd = (HWND)wp;
++                    data->remote_layers = grown;
++                    data->remote_layer_count++;
++                }
 +                macdrv_view_create_ca_layer_host(data->remote_layer_view, (unsigned int)lp);
++            }
 +            release_win_data(data);
++            macdrv_resync_remote_layers(hwnd);
 +        }
 +        return 0;
 +    case WM_MACDRV_RELEASE_REMOTE_LAYER:
-+        if ((data = get_win_data(hwnd)))
++        data = get_win_data(hwnd);
++        if (data)
 +        {
++            unsigned int i;
++
 +            TRACE("WM_MACDRV_RELEASE_REMOTE_LAYER context_id %u\n", (unsigned int)lp);
++            for (i = 0; i < data->remote_layer_count; i++)
++            {
++                if (data->remote_layers[i].ctx != (unsigned int)lp) continue;
++                data->remote_layers[i] = data->remote_layers[--data->remote_layer_count];
++                break;
++            }
 +            if (data->remote_layer_view)
 +                macdrv_view_release_ca_layer_host(data->remote_layer_view, (unsigned int)lp);
 +            release_win_data(data);
@@ -703,13 +827,13 @@ index 741f7fda..938c552f 100644
      }
  
      FIXME("unrecognized window msg %x hwnd %p wp %lx lp %lx\n", msg, hwnd, (unsigned long)wp, lp);
-@@ -1624,6 +1735,18 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+@@ -1624,6 +1807,18 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
  }
  
  
-+void macdrv_create_remote_layer(void* hwnd_ptr, unsigned int context_id)
++void macdrv_create_remote_layer(void* hwnd_ptr, void* client_ptr, unsigned int context_id)
 +{
-+    NtUserPostMessage((HWND)hwnd_ptr, WM_MACDRV_CREATE_REMOTE_LAYER, 0, context_id);
++    NtUserPostMessage((HWND)hwnd_ptr, WM_MACDRV_CREATE_REMOTE_LAYER, (WPARAM)client_ptr, context_id);
 +}
 +
 +
@@ -722,3 +846,14 @@ index 741f7fda..938c552f 100644
  /***********************************************************************
   *              WindowPosChanging   (MACDRV.@)
   */
+@@ -1682,6 +1877,10 @@ void macdrv_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT
+     unsigned int new_style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
+     struct window_rects old_rects;
+ 
++    /* a child window this driver otherwise ignores may be the render target of
++     * another process's hosted layer; show/hide and z changes land here */
++    macdrv_resync_remote_layers(NtUserGetAncestor(hwnd, GA_ROOT));
++
+     if (!(data = get_win_data(hwnd))) return;
+ 
+     thread_data = macdrv_thread_data();
