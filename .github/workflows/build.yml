@@ -57,7 +57,7 @@ env:
   # major.minor only. the patch number is the commit count, so it moves on its
   # own and two builds of the same tree still stamp the same version. bump this
   # by hand when a release deserves to be called something new.
-  RUNTIME_SERIES: "4.4"
+  RUNTIME_SERIES: "4.5"
   # Without this every binary carries the minos of whatever built it, so the
   # self-hosted runner stamped macOS 27 onto a runtime dyld then refuses to load
   # anywhere older. Whisky's own floor has to match this number.
