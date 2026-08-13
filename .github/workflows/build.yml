@@ -40,11 +40,11 @@ on:
 # of 2026, which is this project's deadline for finding another source of
 # x86_64 macOS libraries.
 env:
-  # crossover 26.3.0, wine 11.0. phoenicis stops at 25.1.0 and has not
-  # mirrored 26.x, so this is our own import of codeweavers' source drop,
-  # committed on top of their 25.1.0 tag so the releases still diff.
+  # the wine1115 branch of our winecx import: crossover 26.3's diff merged
+  # onto wine 11.15 with every patch committed in-tree, so patches/ is empty
+  # on this branch and the apply loop is a no-op.
   WINECX_REPO: https://github.com/dappermint/winecx.git
-  WINECX_COMMIT: 40c09507dc9f767b234015b0ac50173795f978fc
+  WINECX_COMMIT: d81a288a66aa5e0d05440a73c587d24673c1452c
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
   MOLTENVK_VERSION: "1.4.2"
   FAUDIO_VERSION: "26.08"
@@ -57,7 +57,7 @@ env:
   # major.minor only. the patch number is the commit count, so it moves on its
   # own and two builds of the same tree still stamp the same version. bump this
   # by hand when a release deserves to be called something new.
-  RUNTIME_SERIES: "4.3"
+  RUNTIME_SERIES: "4.4"
   # Without this every binary carries the minos of whatever built it, so the
   # self-hosted runner stamped macOS 27 onto a runtime dyld then refuses to load
   # anywhere older. Whisky's own floor has to match this number.
@@ -142,41 +142,24 @@ jobs:
           git -C winecx checkout --detach "$WINECX_COMMIT"
           git -C winecx --no-pager log -1 --oneline
 
-      - name: update vendored faudio
+      - name: verify vendored faudio
         run: |
-          # winecx vendors FAudio 24.10 and upstream is on 26.08. wine's own
-          # changes to it are 24 lines of portability, no functional
-          # divergence, so the tree can be replaced wholesale and patch 0023
-          # puts those lines back.
-          #
-          # this does NOT fix the 5.1-into-stereo bug. FAudio still swaps the
-          # requested mastering voice channel count for the device's without
-          # telling the caller, so a game that asks for 5.1 on stereo hardware
-          # has every SetOutputMatrix rejected and loses positional audio.
-          # upstream 26.08 has the same code. the bump is for everything else.
-          want=5547ac583e2cd1caf0496db62a4c9a813dd6832a2e8b51b1efc00e9492704fce
-          curl -fsSL -o faudio.tar.gz \
-            "https://github.com/FNA-XNA/FAudio/archive/refs/tags/$FAUDIO_VERSION.tar.gz"
-          got=$(shasum -a 256 faudio.tar.gz | cut -d' ' -f1)
-          [ "$got" = "$want" ] || { echo "::error::faudio hash $got != $want"; exit 1; }
-          tar -xzf faudio.tar.gz
-          cp "FAudio-$FAUDIO_VERSION"/src/* winecx/libs/faudio/src/
-          cp "FAudio-$FAUDIO_VERSION"/include/* winecx/libs/faudio/include/
-          # wine builds none of these and XNA_Song.c does not compile here
-          rm -f winecx/libs/faudio/src/FAudio_platform_sdl2.c \
-                winecx/libs/faudio/src/FAudio_platform_sdl3.c \
-                winecx/libs/faudio/src/qoa_decoder.h \
-                winecx/libs/faudio/src/XNA_Song.c
+          # this branch commits FAudio 26.08 and its portability fixes in the
+          # winecx tree itself; overlaying upstream sources here would wipe
+          # them. only verify the version matches the pin.
           ver() { grep -oE "FAUDIO_${1}_VERSION[[:space:]]+[0-9]+" \
                     winecx/libs/faudio/include/FAudio.h | grep -oE '[0-9]+$'; }
           got="$(ver MAJOR).$(ver MINOR)"
           want="${FAUDIO_VERSION%%.*}.$((10#${FAUDIO_VERSION##*.}))"
           [ "$got" = "$want" ] || { echo "::error::faudio headers say $got, not $want"; exit 1; }
-          echo "faudio: $FAUDIO_VERSION"
+          echo "faudio: $FAUDIO_VERSION (in-tree)"
 
       - name: apply patches
         run: |
+          # committed in the winecx branch on this lane; the glob guard keeps
+          # an empty patches/ from failing the loop
           for p in "$PWD"/patches/*.patch; do
+            [ -e "$p" ] || { echo "no out-of-tree patches"; break; }
             echo "applying $(basename "$p")"
             git -C winecx apply --verbose "$p"
           done
@@ -444,6 +427,7 @@ jobs:
           case "$mono_ver" in
             9.4.0)  mono_sha=fd772219aacf46b825fa891a647af4a9ddf8439320101c231918b2037bf13858 ;;
             10.4.1) mono_sha=a16606ef0724202e6a6848ece6e0cbba64d11e2f11aefe744af1d93c6d9f99bb ;;
+            11.2.0) mono_sha=c9fb2e2823acf30b000b8806177db0f40751786136dd3f8fb2be7897b1643d06 ;;
             *) echo "no pinned hash for mono $mono_ver"; exit 1 ;;
           esac
           case "$gecko_ver" in
