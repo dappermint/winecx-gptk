@@ -40,7 +40,11 @@ on:
 # of 2026, which is this project's deadline for finding another source of
 # x86_64 macOS libraries.
 env:
-  WINECX_COMMIT: aa5ddd8eae4d785a95a6199f17e9deed6625f07f
+  # the wine1115 branch of our winecx import: crossover 26.3's diff merged
+  # onto wine 11.15 with every patch committed in-tree, so patches/ is empty
+  # on this branch and the apply loop is a no-op.
+  WINECX_REPO: https://github.com/dappermint/winecx.git
+  WINECX_COMMIT: c2cce0e61e01dd6e03ee854af526cc17d4412b52
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
   MOLTENVK_VERSION: "1.4.2"
   FAUDIO_VERSION: "26.08"
@@ -53,7 +57,7 @@ env:
   # major.minor only. the patch number is the commit count, so it moves on its
   # own and two builds of the same tree still stamp the same version. bump this
   # by hand when a release deserves to be called something new.
-  RUNTIME_SERIES: "4.3"
+  RUNTIME_SERIES: "4.5"
   # Without this every binary carries the minos of whatever built it, so the
   # self-hosted runner stamped macOS 27 onto a runtime dyld then refuses to load
   # anywhere older. Whisky's own floor has to match this number.
@@ -107,7 +111,13 @@ jobs:
           # the PE half's cross compilers are wrapped in the mingw step, once
           # their real paths are known
 
+      # hosted only. ~/.ccache is on the self-hosted runner's own disk and is
+      # still there next run, so archiving it to github and pulling it back is
+      # pure cost: measured on run 31625185579 at 102s to restore and 1215s to
+      # save, against a make of 71s. a hosted runner is a fresh vm and does
+      # need it.
       - name: restore compiler cache
+        if: inputs.runner == 'hosted'
         uses: actions/cache@v4
         with:
           path: ~/.ccache
@@ -128,45 +138,28 @@ jobs:
 
       - name: clone winecx
         run: |
-          git clone https://github.com/PhoenicisOrg/winecx.git winecx
+          git clone "$WINECX_REPO" winecx
           git -C winecx checkout --detach "$WINECX_COMMIT"
           git -C winecx --no-pager log -1 --oneline
 
-      - name: update vendored faudio
+      - name: verify vendored faudio
         run: |
-          # winecx vendors FAudio 24.10 and upstream is on 26.08. wine's own
-          # changes to it are 24 lines of portability, no functional
-          # divergence, so the tree can be replaced wholesale and patch 0023
-          # puts those lines back.
-          #
-          # this does NOT fix the 5.1-into-stereo bug. FAudio still swaps the
-          # requested mastering voice channel count for the device's without
-          # telling the caller, so a game that asks for 5.1 on stereo hardware
-          # has every SetOutputMatrix rejected and loses positional audio.
-          # upstream 26.08 has the same code. the bump is for everything else.
-          want=5547ac583e2cd1caf0496db62a4c9a813dd6832a2e8b51b1efc00e9492704fce
-          curl -fsSL -o faudio.tar.gz \
-            "https://github.com/FNA-XNA/FAudio/archive/refs/tags/$FAUDIO_VERSION.tar.gz"
-          got=$(shasum -a 256 faudio.tar.gz | cut -d' ' -f1)
-          [ "$got" = "$want" ] || { echo "::error::faudio hash $got != $want"; exit 1; }
-          tar -xzf faudio.tar.gz
-          cp "FAudio-$FAUDIO_VERSION"/src/* winecx/libs/faudio/src/
-          cp "FAudio-$FAUDIO_VERSION"/include/* winecx/libs/faudio/include/
-          # wine builds none of these and XNA_Song.c does not compile here
-          rm -f winecx/libs/faudio/src/FAudio_platform_sdl2.c \
-                winecx/libs/faudio/src/FAudio_platform_sdl3.c \
-                winecx/libs/faudio/src/qoa_decoder.h \
-                winecx/libs/faudio/src/XNA_Song.c
+          # this branch commits FAudio 26.08 and its portability fixes in the
+          # winecx tree itself; overlaying upstream sources here would wipe
+          # them. only verify the version matches the pin.
           ver() { grep -oE "FAUDIO_${1}_VERSION[[:space:]]+[0-9]+" \
                     winecx/libs/faudio/include/FAudio.h | grep -oE '[0-9]+$'; }
           got="$(ver MAJOR).$(ver MINOR)"
           want="${FAUDIO_VERSION%%.*}.$((10#${FAUDIO_VERSION##*.}))"
           [ "$got" = "$want" ] || { echo "::error::faudio headers say $got, not $want"; exit 1; }
-          echo "faudio: $FAUDIO_VERSION"
+          echo "faudio: $FAUDIO_VERSION (in-tree)"
 
       - name: apply patches
         run: |
+          # committed in the winecx branch on this lane; the glob guard keeps
+          # an empty patches/ from failing the loop
           for p in "$PWD"/patches/*.patch; do
+            [ -e "$p" ] || { echo "no out-of-tree patches"; break; }
             echo "applying $(basename "$p")"
             git -C winecx apply --verbose "$p"
           done
@@ -427,10 +420,22 @@ jobs:
           set -eu
           mono_ver=$(sed -n 's/^#define MONO_VERSION "\(.*\)"/\1/p' winecx/dlls/appwiz.cpl/addons.c)
           gecko_ver=$(sed -n 's/^#define GECKO_VERSION "\(.*\)"/\1/p' winecx/dlls/appwiz.cpl/addons.c)
-          [ "$mono_ver" = "9.4.0" ] && [ "$gecko_ver" = "2.47.4" ] || {
-            echo "winecx now wants mono $mono_ver, gecko $gecko_ver; update the pinned hashes"
-            exit 1
-          }
+
+          # a hash has to be pinned for whatever version winecx asks for, so
+          # unknown versions still fail. keeping both bases in the table lets
+          # the wine 10 and wine 11 branches share this file.
+          case "$mono_ver" in
+            9.4.0)  mono_sha=fd772219aacf46b825fa891a647af4a9ddf8439320101c231918b2037bf13858 ;;
+            10.4.1) mono_sha=a16606ef0724202e6a6848ece6e0cbba64d11e2f11aefe744af1d93c6d9f99bb ;;
+            11.2.0) mono_sha=c9fb2e2823acf30b000b8806177db0f40751786136dd3f8fb2be7897b1643d06 ;;
+            *) echo "no pinned hash for mono $mono_ver"; exit 1 ;;
+          esac
+          case "$gecko_ver" in
+            2.47.4) gecko_x86_sha=2cfc8d5c948602e21eff8a78613e1826f2d033df9672cace87fed56e8310afb6
+                    gecko_x64_sha=fd88fc7e537d058d7a8abf0c1ebc90c574892a466de86706a26d254710a82814 ;;
+            *) echo "no pinned hashes for gecko $gecko_ver"; exit 1 ;;
+          esac
+          echo "mono $mono_ver, gecko $gecko_ver"
 
           fetch() {
             curl -fsSL -o "$2" "$1"
@@ -440,11 +445,11 @@ jobs:
 
           mkdir -p addons/mono addons/gecko
           fetch "https://dl.winehq.org/wine/wine-mono/$mono_ver/wine-mono-$mono_ver-x86.tar.xz" \
-                mono.tar.xz fd772219aacf46b825fa891a647af4a9ddf8439320101c231918b2037bf13858
+                mono.tar.xz "$mono_sha"
           fetch "https://dl.winehq.org/wine/wine-gecko/$gecko_ver/wine-gecko-$gecko_ver-x86.tar.xz" \
-                gecko-x86.tar.xz 2cfc8d5c948602e21eff8a78613e1826f2d033df9672cace87fed56e8310afb6
+                gecko-x86.tar.xz "$gecko_x86_sha"
           fetch "https://dl.winehq.org/wine/wine-gecko/$gecko_ver/wine-gecko-$gecko_ver-x86_64.tar.xz" \
-                gecko-x64.tar.xz fd88fc7e537d058d7a8abf0c1ebc90c574892a466de86706a26d254710a82814
+                gecko-x64.tar.xz "$gecko_x64_sha"
 
           tar -xJf mono.tar.xz -C addons/mono
           tar -xJf gecko-x86.tar.xz -C addons/gecko
@@ -483,8 +488,31 @@ jobs:
       - name: install and package
         run: |
           export PATH="$NIX_TOOL_PATH$PATH"
+
+          # this step ran 1517s on run 31625185579 against a make of 71s, and
+          # the obvious suspects all measured small on this machine: the
+          # per-file python3 13s over 700 files, codesign 10s, the tree copies
+          # under a second. so the cost is somewhere else and guessing at it
+          # wasted a round. report each phase and let the build say.
+          _t0=$SECONDS; _tp=$SECONDS
+          phase() { echo "::notice::phase $1: $((SECONDS-_tp))s (total $((SECONDS-_t0))s)"; _tp=$SECONDS; }
+
           cd build
-          make install DESTDIR="$PWD/../staging"
+          # install-lib, not install, and this is where the step's 25 minutes
+          # went. wine's `install` also runs install-dev, whose prerequisite
+          # list is 2181 import libraries -- caught in the act on run
+          # 31650565219, compiling dlls/d3dx9_25 fourteen minutes into a step
+          # that is supposed to be copying files. every one of them was then
+          # thrown away four lines below by the *.a delete. install-lib is
+          # wine's own target for "libraries needed to run applications" and
+          # is what install-image uses; it carries the dlls, the unix .so
+          # modules, the loader, nls and fonts.
+          #
+          # and -j, which install never had, so whatever is left to build now
+          # uses the machine.
+          ncpu=$(sysctl -n hw.logicalcpu)
+          make -j"$ncpu" install-lib DESTDIR="$PWD/../staging"
+          phase "make install-lib"
           mkdir -p "$PWD/../staging/opt/whiskywine/share/wine/mono" "$PWD/../staging/opt/whiskywine/share/wine/gecko"
           cp -R "$PWD/../addons/mono"/* "$PWD/../staging/opt/whiskywine/share/wine/mono/"
           cp -R "$PWD/../addons/gecko"/* "$PWD/../staging/opt/whiskywine/share/wine/gecko/"
@@ -493,6 +521,7 @@ jobs:
           cp -R staging/opt/whiskywine/bin Libraries/Wine/bin
           cp -R staging/opt/whiskywine/lib Libraries/Wine/lib
           cp -R staging/opt/whiskywine/share Libraries/Wine/share
+          phase "copy staging into Libraries"
 
           # dxmt's wine-side half is ONLY the winemetal bridge. copying the
           # whole payload dir in here would overwrite wine's builtin
@@ -547,6 +576,11 @@ jobs:
           # ~600MB of the tree.
           command -v x86_64-w64-mingw32-strip >/dev/null || {
             echo "::error::x86_64-w64-mingw32-strip not on PATH"; exit 1; }
+          # install-lib does not install these any more, so this should find
+          # nothing. kept as the guard that says so if that ever changes back
+          a=$(find Libraries/Wine/lib/wine/*-windows -name '*.a' | wc -l | tr -d ' ')
+          [ "$a" = 0 ] && echo "import libraries: none installed, as expected" \
+                       || echo "::warning::install-lib brought in $a import libraries, deleting"
           find Libraries/Wine/lib/wine/*-windows -name '*.a' -delete
           # batched: gnu strip prints an error for a non-COFF file (.tlb, .nls)
           # and keeps going with the rest of the batch, unlike llvm-strip which
@@ -555,10 +589,26 @@ jobs:
           find Libraries/Wine/lib/wine/*-windows -type f -print0 \
             | xargs -0 -P "$(sysctl -n hw.logicalcpu)" -n 64 \
                 x86_64-w64-mingw32-strip --strip-debug 2>/dev/null || true
-          # CW HACK 22144: on apple without a preloader the loader expects its
-          # own binary to be named wineloader; whisky expects wine64
-          cp Libraries/Wine/bin/wine Libraries/Wine/bin/wineloader
-          ln -s wine Libraries/Wine/bin/wine64
+          phase "strip the PE half"
+          # wine 11 installs the loader beside ntdll.so in lib/wine/<arch>-unix
+          # instead of in bin, and bin now gets only wineserver. that is not
+          # cosmetic: loader/main.c dlopens "ntdll.so" out of its own
+          # realpath'd directory, and ntdll computes the loader back the same
+          # way, as <ntdll_dir>/wine (dlls/ntdll/unix/loader.c). a copy into
+          # bin looks for bin/ntdll.so and dies, measured on the 26.3 tree:
+          #   wine: could not load ntdll.so: dlopen(.../bin/ntdll.so)
+          # symlinks are fine, because realpath resolves them back to the real
+          # directory before the dirname is taken. verified: bin/wine64 through
+          # a symlink prints winecx-26.3.0.
+          #
+          # whisky invokes bin/wine64, so bin still has to offer these names.
+          # CW HACK 22144 wants wineloader among them.
+          loader=Libraries/Wine/lib/wine/x86_64-unix/wine
+          [ -x "$loader" ] || { echo "::error::no loader at $loader"; exit 1; }
+          for n in wine wine64 wineloader; do
+            ln -sf ../lib/wine/x86_64-unix/wine "Libraries/Wine/bin/$n"
+          done
+          ./Libraries/Wine/bin/wine64 --version
 
           # bundle the nix dylib closure flat into Wine/lib and rewrite
           # store references to loader-relative so the tarball is portable
@@ -586,6 +636,7 @@ jobs:
             done
           done
           echo "gstreamer plugins: $(ls "$LIBDIR/gstreamer-1.0" | wc -l | tr -d ' ')"
+          phase "copy gstreamer plugins"
 
           # MoltenVK is the one dlopened library that no longer comes out of the
           # nix closure, so it is placed by hand. it needs no closure walk: its
@@ -624,6 +675,8 @@ jobs:
             done
           done
 
+          phase "nix closure walk"
+
           # two iconvs are needed and they are not interchangeable: _iconv is
           # only in macOS's /usr/lib copy, _libiconv only in nix's. ask each
           # library which it imports rather than naming names -- the name list
@@ -661,6 +714,8 @@ jobs:
           done
           find Libraries/Wine/bin -type f | while read -r f; do fixup "$f"; done
           find Libraries/Wine/lib/wine -name "*.so" | while read -r f; do fixup "$f"; done
+
+          phase "fixup: install_name_tool and codesign"
 
           # the reference runtime ships both names; match it
           ln -sf libfreetype.6.dylib "$LIBDIR/libfreetype.dylib"
@@ -796,13 +851,16 @@ jobs:
           }
 
           # the extracted addons the stock engine also ships. without them a new
-          # prefix stops on a modal wine-mono dialog and waits for a click
-          for d in share/wine/mono/wine-mono-9.4.0 \
-                   share/wine/gecko/wine-gecko-2.47.4-x86 \
-                   share/wine/gecko/wine-gecko-2.47.4-x86_64; do
-            [ -d "Libraries/Wine/$d" ] || { echo "::error::missing $d"; exit 1; }
+          # prefix stops on a modal wine-mono dialog and waits for a click.
+          # globbed rather than pinned: which versions to fetch is already
+          # decided by winecx's addons.c, and asserting them twice means every
+          # bump breaks here too
+          for d in Libraries/Wine/share/wine/mono/wine-mono-* \
+                   Libraries/Wine/share/wine/gecko/wine-gecko-*-x86 \
+                   Libraries/Wine/share/wine/gecko/wine-gecko-*-x86_64; do
+            [ -d "$d" ] || { echo "::error::missing $d"; exit 1; }
+            echo "addons: $(basename "$d")"
           done
-          echo "addons: ok"
 
           # without a d3d11 implementation steam paints nothing: wined3d goes
           # through apple's opengl, frozen at 4.1, and ANGLE reports feature
@@ -926,3 +984,8 @@ jobs:
             Libraries.tar.gz
             Libraries.tar.gz.sha256
           retention-days: 14
+          # left at the default 6. tried 0 on the theory that re-deflating an
+          # already-gzipped payload is wasted work, and it went the wrong way:
+          # 860s for 428MB at the default against 1139s for 434MB at 0. the
+          # bottleneck is this runner's uplink at roughly 1MB/s, not its cpu,
+          # and level 6 can only ever put fewer bytes on the wire.
