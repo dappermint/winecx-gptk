@@ -1000,6 +1000,8 @@ jobs:
             Libraries.tar.gz
             Libraries.tar.gz.sha256
           retention-days: 14
-          # the payload is already gzip. the default level 6 spends the upload
-          # re-deflating an incompressible 330MB blob for no size back
-          compression-level: 0
+          # left at the default 6. tried 0 on the theory that re-deflating an
+          # already-gzipped payload is wasted work, and it went the wrong way:
+          # 860s for 428MB at the default against 1139s for 434MB at 0. the
+          # bottleneck is this runner's uplink at roughly 1MB/s, not its cpu,
+          # and level 6 can only ever put fewer bytes on the wire.
