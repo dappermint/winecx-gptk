@@ -1,18 +1,12 @@
 # winecx-gptk
 
-ci build of a gptk-capable wine runtime for the [frankea/Whisky](https://github.com/frankea/Whisky) fork, from codeweavers' crossover wine sources.
+ci build of a gptk-capable wine runtime for the [frankea/Whisky](https://github.com/frankea/Whisky) fork: codeweavers' crossover 26.3 wine changes, rebased onto upstream wine 11.15.
 
 why: apple's game porting toolkit / d3dmetal payload only executes on crossover-derived wine builds, it patches their unixcall internals at load time. details in [frankea/Whisky#163](https://github.com/frankea/Whisky/issues/163), importer app-side in [frankea/Whisky#164](https://github.com/frankea/Whisky/pull/164).
 
-## lanes
+the source tree is the [`wine1115` branch of dappermint/winecx](https://github.com/dappermint/winecx/tree/wine1115): crossover 26.3's diff (221 files against its wine 11.0 base) merged onto wine 11.15 via a synthetic three-way, with every local patch committed in the tree itself. `patches/` in this repo is empty on purpose; the apply step is a guarded no-op. the crossover diff turned out compact enough that tracking upstream wine releases is sustainable, most of the rebase churn was mechanical.
 
-| branch | base | series | state |
-|---|---|---|---|
-| `main` | crossover 25.1 (wine 10.0), [PhoenicisOrg mirror](https://github.com/PhoenicisOrg/winecx) | 4.3 | frozen, first line that proved d3dmetal on a self-built runtime |
-| `feat/wine-11-patches` | crossover 26.3 (wine 11.0), [our import](https://github.com/dappermint/winecx) | 4.3 | steam ui, d3d12 12_2, the cross-process metal bridge as `patches/0003` |
-| `feat/wine-11.15` | crossover 26.3 diff rebased onto wine 11.15, [`wine1115` branch](https://github.com/dappermint/winecx/tree/wine1115) | 4.5 | current release lane; patches live in the winecx tree, `patches/` is empty here |
-
-the 11.15 lane is the interesting one: the 26.3 diff is 221 files against wine 11.0, and rebasing it onto upstream's current dev release turned out mostly mechanical. wine 11.x grew its own CALayerHost cross-process swapchain machinery, so our bridge shrank to the two halves upstream still lacks, child windows and win32 visibility/z mirroring for hosted layers. tracking upstream wine looks sustainable.
+what runs on it, measured on an m5: steam's ui end to end, d3d12 through d3dmetal at feature level 12_2 (binding tier 3, sm 6.6), dxvk d3d11, msync, and the media stack.
 
 what the workflow does:
 
@@ -25,7 +19,7 @@ what the workflow does:
 gates that refuse to ship a bad tree, each one added after that exact thing shipped silently:
 
 - **relocatability.** every Mach-O file is swept for absolute non-system references. a dylib whose own id is a `/nix/store` path cannot be dlopened off the builder, which cost fonts, vulkan and tls for seven builds without a single error message.
-- **every bundled library dlopens.** the closure is loaded file by file on the builder with the store paths masked; this is what caught the libiconv split (`_iconv` vs `_libiconv`) that had silently killed the whole media stack.
+- **every bundled library dlopens.** the closure is loaded file by file on the builder with the store paths masked; this caught the libiconv split (`_iconv` vs `_libiconv`) that had silently killed the whole media stack.
 - **the runtime opens a window and media foundation has decoders.** `wine --version` passes on runtimes that cannot create a window.
 - **the i386 half is non-empty.** a 64-bit-only tree cannot load `syswow64\ntdll.dll`, so every 32-bit program dies with `c0000135`.
 - **the PE half is stripped.** gcc emits DWARF and nothing removes it; `ntdll.dll` is 3.0MB unstripped against the stock engine's 0.7MB, and everything still runs.
@@ -43,12 +37,14 @@ everything the build consumes is pinned in-tree:
 
 builds run on a self-hosted runner by default (warm ccache, ~15 min); the `hosted` dispatch input is the clean-room check and what releases should come from when provenance matters more than turnaround.
 
-## patches
+## notable changes carried in the tree
 
-on `main` and `feat/wine-11-patches`, `patches/` is applied to the winecx tree after cloning; descriptions live in each patch header. on `feat/wine-11.15` the same changes are commits in the winecx `wine1115` branch itself.
+**ntdll: don't call a foreign personality routine as an SEH handler.** `virtual_unwind()` leaves `LDR_DATA_TABLE_ENTRY *module` uninitialised and `LdrFindEntryForAddress` does not touch it on failure, so for a fault in Mach-O code the "personality routine in system library" guard reads garbage and never fires; wine then calls a libunwind personality routine as a windows exception handler and recurses to stack death. still present upstream as of wine 11.15, applied at the moved location there.
 
-the two worth knowing about:
+**winemac: host cross-process metal layers over CAContext.** wine 11.x grew CALayerHost cross-process swapchains upstream; what it still lacks is child windows and win32 state mirroring for hosted layers, which is what steam's chromium needs. the gpu process renders into another process's child windows; the owner hosts the published tree and re-derives hidden state and z-order from the win32 windows on every WindowPosChanged. without the mirroring, chromium's hidden standby surface covers the live one with one stale black frame, which shows up as a fully rendered steam library under a black layer.
 
-**ntdll: don't call a foreign personality routine as an SEH handler.** `virtual_unwind()` leaves `LDR_DATA_TABLE_ENTRY *module` uninitialised and `LdrFindEntryForAddress` does not touch it on failure, so for a fault in Mach-O code the "personality routine in system library" guard reads garbage and never fires; wine then calls a libunwind personality routine as a windows exception handler and recurses to stack death. still present upstream as of wine 11.15, re-applied at the moved location there.
+**d3dkmt: adapter identity and segment sizes.** five more KMTQAITYPEs answered honestly from vulkan (adapter type, physical adapter count, pci address, adapter guid, segment sizes), placed above crossover's WDDM 2.7 hack so its fallthrough keeps reaching `default` for non-d3dmetal backends.
 
-**winemac: host cross-process metal layers over CAContext.** chromium's gpu process renders into another process's child windows; the owner hosts the published layer tree and mirrors win32 visibility and z-order onto it. without the mirroring, chromium's hidden standby surface covers the live one with one stale black frame, which is a fully rendered steam library under a black layer.
+## history
+
+the wine 10 line (crossover 25.1, series 4.3) proved d3dmetal executes on a self-built runtime and carried the first version of the cross-process bridge as four patches; the wine 11.0 line (crossover 26.3, `feat/wine-11-patches` era) collapsed them to one. both are tagged in this repo's release history and the old patch files live in those releases' trees.
