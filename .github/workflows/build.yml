@@ -833,6 +833,105 @@ jobs:
           fi
           echo "deployment target: nothing newer than macOS $floor"
 
+          # v4.5.0 shipped an ntdll.so with an undefined pipe2 (#3): the macos
+          # 27 sdk declared it, the 26.0 floor does not have it, and the dlopen
+          # sweep below cannot see a lazily bound import on a host that has the
+          # symbol. so audit the artifact itself: every undefined symbol in
+          # every bundled mach-o must exist in the sdk's stubs or in something
+          # we bundle. weak imports count, a weak import is how the compiler
+          # links an api it knows is above the floor. authoritative only when
+          # the sdk matches the floor; wider than that the pass proves little,
+          # which the summary line says.
+          sdkpath=$(xcrun --sdk macosx --show-sdk-path)
+          sdkver=$(xcrun --sdk macosx --show-sdk-version)
+          python3 - "$sdkpath" "$sdkver" <<'PYEOF'
+          import os, re, subprocess, sys
+
+          sdk = sys.argv[1]
+          sdkver = sys.argv[2]
+          floor = int(os.environ['MACOSX_DEPLOYMENT_TARGET'].split('.')[0])
+
+          universe = set()
+          pat_list = re.compile(
+              r"(symbols|weak-symbols|thread-local-symbols|objc-classes|objc-eh-types|objc-ivars)"
+              r":\s*\[([^\]]*)\]", re.S)
+          for root, dirs, files in os.walk(sdk):
+              for name in files:
+                  if not name.endswith('.tbd'):
+                      continue
+                  try:
+                      text = open(os.path.join(root, name), errors='ignore').read()
+                  except OSError:
+                      continue
+                  for kind, body in pat_list.findall(text):
+                      for tok in body.split(','):
+                          tok = tok.strip().strip("'\"")
+                          if not tok:
+                              continue
+                          if kind in ('objc-classes', 'objc-eh-types'):
+                              universe.add('_OBJC_CLASS_$_' + tok)
+                              universe.add('_OBJC_METACLASS_$_' + tok)
+                              universe.add('_OBJC_EHTYPE_$_' + tok)
+                          elif kind == 'objc-ivars':
+                              universe.add('_OBJC_IVAR_$_' + tok)
+                          else:
+                              universe.add(tok)
+
+          MAGICS = (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca')
+          machos = []
+          for root, dirs, files in os.walk('Libraries'):
+              for name in files:
+                  p = os.path.join(root, name)
+                  if os.path.islink(p):
+                      continue
+                  try:
+                      with open(p, 'rb') as fh:
+                          magic = fh.read(4)
+                  except OSError:
+                      continue
+                  if magic in MAGICS:
+                      machos.append(p)
+
+          def nm(args, path):
+              r = subprocess.run(['nm'] + args + [path], capture_output=True, text=True)
+              return r.stdout if r.returncode == 0 else ''
+
+          for p in machos:
+              for line in nm(['-gUj'], p).splitlines():
+                  line = line.strip()
+                  if line and not line.endswith(':'):
+                      universe.add(line)
+
+          bad = {}
+          for p in machos:
+              for line in nm(['-m'], p).splitlines():
+                  if '(undefined)' not in line:
+                      continue
+                  m = re.search(r'external (\S+)', line)
+                  if not m:
+                      continue
+                  sym = m.group(1)
+                  if sym not in universe:
+                      kind = 'weak, so the compiler knew' if ' weak ' in line else 'strong'
+                      bad.setdefault(p, set()).add('%s (%s)' % (sym, kind))
+
+          if bad:
+              for p in sorted(bad):
+                  for s in sorted(bad[p]):
+                      print('::error::unresolvable at the floor: %s needs %s' % (p, s))
+              total = sum(len(v) for v in bad.values())
+              print('::error::%d undefined symbol(s) outside the sdk and the bundle' % total)
+              sys.exit(1)
+
+          sdk_major = int(sdkver.split('.')[0])
+          if sdk_major > floor:
+              print('undefined-symbol audit: clean against the %s sdk, but the floor is %d; '
+                    'only a matching sdk makes this a proof' % (sdkver, floor))
+          else:
+              print('undefined-symbol audit: clean against the %s sdk, floor %d' % (sdkver, floor))
+          print('%d mach-o files, %d symbols in the universe' % (len(machos), len(universe)))
+          PYEOF
+
           # a 64-bit-only tree cannot load syswow64\ntdll.dll, so every 32-bit
           # program dies with c0000135. one build shipped with this empty.
           i386=$(ls Libraries/Wine/lib/wine/i386-windows 2>/dev/null | wc -l | tr -d ' ')
