@@ -27,8 +27,18 @@ object shared by opengl, vulkan and d3dmetal.
 succeed: it makes a standalone view. That was the exact failure 0003 was
 written for, so the create-time half of the problem is fixed upstream.
 `macdrv_client_surface_update` still resolves the toplevel through
-`get_win_data`, so a cross-process toplevel should still leave the view
-unattached. Unconfirmed, and worth measuring before writing anything.
+`get_win_data` and returns early for a cross-process toplevel, so the view is
+never attached to anything.
+
+**Measured 2026-08-13** on runtime 4.3.81 with these four held out, steam
+launched against DXVK with per-exe overrides. Creation is genuinely fixed:
+`of other process`, `Failed to create surface`, `EGL_BAD_ALLOC` and
+`Could not create additional swap chain` are all 0, against 103 swapchains
+created and 57 distinct `WineMetalView` layers rendering at real geometry
+(1800x988, 1278x657, 690x744, and 700x440 for the login window). The window
+still reads `luma=0.0 colors=1` at t=270s, past the ~210s steam takes to paint.
+Frames are produced correctly and never reach a window. So the bridge is still
+ours to carry, and the remaining work is attachment only.
 
 - **vulkan.c** — do not port. Wine 11 rewrote it from ~250 lines to 141 and
   the hunks have nothing to attach to. The one hook that serves all three
