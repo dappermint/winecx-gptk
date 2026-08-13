@@ -44,7 +44,7 @@ env:
   # onto wine 11.15 with every patch committed in-tree, so patches/ is empty
   # on this branch and the apply loop is a no-op.
   WINECX_REPO: https://github.com/dappermint/winecx.git
-  WINECX_COMMIT: bf56d805a111ceec2dfb6512f88e9d48e9ff97f3
+  WINECX_COMMIT: 68a07ad9ac763d5062edf66fbd5d8911b44611a1
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
   MOLTENVK_VERSION: "1.4.2"
   FAUDIO_VERSION: "26.08"
