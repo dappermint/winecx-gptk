@@ -312,6 +312,8 @@ jobs:
           echo "gstreamer: found"
 
       - name: make
+        env:
+          OPT_LEVEL: ${{ inputs.opt }}
         run: |
           export PATH="$PWD/ccache-bin:$NIX_TOOL_PATH$PATH"
           cd build
@@ -319,7 +321,29 @@ jobs:
           # winebuild, so oversubscribing by half keeps them fed
           ncpu=$(sysctl -n hw.logicalcpu)
           ccache -z >/dev/null
-          make -j"$(( ncpu + ncpu / 2 ))"
+          set -o pipefail
+          make -j"$(( ncpu + ncpu / 2 ))" 2>&1 | tee /tmp/make.log
+
+          # pinning the deployment target stops the binaries claiming to be
+          # newer, but not configure finding an API the SDK declares and the
+          # floor does not have: the dappermint lane's v4.0.1 linked pipe2,
+          # macOS 27 only, and ntdll.so would not have loaded on 26 at all.
+          # this lane's hosted image runs its SDK minor versions ahead of the
+          # 15.0 floor, so a 15.x-only API would slip in the same way, and this
+          # is the only gate that can see it.
+          if grep -q "has been marked as being introduced in macOS" /tmp/make.log; then
+            syms=$(grep -oE "'[a-z_0-9]+' has been marked as being introduced in macOS [0-9.]+" /tmp/make.log | sort -u)
+            # fatal only for a build that could be published. a self hosted
+            # runner on a newer macOS always has something to warn about, and
+            # failing every push there would cost the fast lane for nothing.
+            if [ "${OPT_LEVEL:-}" = "release" ]; then
+              printf '%s\n' "$syms" | sed 's/^/::error::newer than the floor: /'
+              echo "::error::a release cannot link these; build on a runner whose SDK matches $MACOSX_DEPLOYMENT_TARGET"
+              exit 1
+            fi
+            printf '%s\n' "$syms" | sed 's/^/::warning::newer than the floor: /'
+            echo "::warning::not shippable as built; fine to iterate on, a release needs a matching SDK"
+          fi
           # per-run numbers, not lifetime ones: this is how we tell whether
           # the restored cache actually did anything
           {
@@ -636,11 +660,8 @@ jobs:
           fi
           echo "relocatable: ok"
 
-          # v4.0.0 shipped with minos 27.0 on wine64, wineserver and every unix
-          # module, because it was built on a macOS 27 runner with no deployment
-          # target set. dyld refuses those outright below that version, and
-          # nothing here noticed: the tree was complete and every other gate
-          # passed. older is fine, newer is unloadable.
+          # v4.0.0 shipped minos 27.0 and dyld refuses that below 27. older is
+          # fine, newer is unloadable, and no other gate can see it.
           floor="${MACOSX_DEPLOYMENT_TARGET%%.*}"
           : > /tmp/toonew
           find Libraries -type f ! -type l -print0 | while IFS= read -r -d '' f; do
