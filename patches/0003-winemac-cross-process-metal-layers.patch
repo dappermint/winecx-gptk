@@ -36,6 +36,14 @@ sized to the top level's client area; and the receiving side must size its view
 from user32, because the cached rects are empty for a child window the driver
 never draws.
 
+The branch keys on the child hwnd, not on its top level. present() and detach()
+both resolve client.hwnd, so a surface whose own window is out of reach can
+never be unhidden however reachable its top level is. Chromium's gpu process
+renders into a child window owned by the browser process while that window's
+top level is still visible from here, so keying on the top level took the local
+path and stayed black -- measured, first cut of this patch, 148 swapchains and
+7152 present calls on one surface with the window at one colour.
+
 d3dmetal declines the cross-process case rather than being handed a null view.
 Steam's ui goes through dxvk, so that path is not needed for it.
 ---
@@ -508,7 +516,7 @@ index d146a45e..7af45619 100644
          res = instance->p_vkCreateMacOSSurfaceMVK(instance->host.instance, &create_info_host, NULL /* allocator */, handle);
      }
 diff --git a/dlls/winemac.drv/window.c b/dlls/winemac.drv/window.c
-index 741f7fda..ff8b9901 100644
+index 741f7fda..938c552f 100644
 --- a/dlls/winemac.drv/window.c
 +++ b/dlls/winemac.drv/window.c
 @@ -1146,6 +1146,7 @@ static void macdrv_client_surface_destroy(struct client_surface *client)
@@ -586,7 +594,7 @@ index 741f7fda..ff8b9901 100644
      if (!(data = get_win_data(surface->client.hwnd))) return;
      if (data->client_view != surface->cocoa_view)
      {
-@@ -1219,21 +1259,51 @@ struct macdrv_client_surface *macdrv_client_surface_create(HWND hwnd)
+@@ -1219,21 +1259,57 @@ struct macdrv_client_surface *macdrv_client_surface_create(HWND hwnd)
  {
      HWND toplevel = NtUserGetAncestor(hwnd, GA_ROOT);
      struct macdrv_client_surface *surface;
@@ -603,7 +611,13 @@ index 741f7fda..ff8b9901 100644
 -    macdrv_set_view_hidden(surface->cocoa_view, TRUE);
 -
 -    if (surface)
-+    if ((data = get_win_data(toplevel)))
++    /* the child hwnd, not the toplevel: present() and detach() both resolve
++     * client.hwnd, so a surface whose own window is out of reach can never be
++     * unhidden however reachable its toplevel is. chromium's gpu process
++     * renders into a child window owned by the browser process, whose toplevel
++     * this process can still see, which is what made an earlier version of this
++     * patch take the local path and stay black. */
++    if ((data = get_win_data(hwnd)))
      {
 -        macdrv_client_surface_update(&surface->client);
 -        macdrv_client_surface_present(&surface->client, 0);
@@ -647,7 +661,7 @@ index 741f7fda..ff8b9901 100644
      return surface;
  }
  
-@@ -1617,6 +1687,41 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+@@ -1617,6 +1693,41 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
          activate_on_following_focus();
          TRACE("WM_MACDRV_ACTIVATE_ON_FOLLOWING_FOCUS time %u\n", activate_on_focus_time);
          return 0;
@@ -689,7 +703,7 @@ index 741f7fda..ff8b9901 100644
      }
  
      FIXME("unrecognized window msg %x hwnd %p wp %lx lp %lx\n", msg, hwnd, (unsigned long)wp, lp);
-@@ -1624,6 +1729,18 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+@@ -1624,6 +1735,18 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
  }
  
  
