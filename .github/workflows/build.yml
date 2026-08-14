@@ -729,6 +729,41 @@ jobs:
             codesign -f -s - "$f" 2>/dev/null || true
           done
 
+          # d3dmetal exposes no ID3D12VideoDevice, so a game that decodes video
+          # itself and asks d3d12 to convert NV12 to RGB gets E_NOINTERFACE and
+          # falls back to a path no windows machine runs: stalker cop ee draws
+          # its intro half resolution with the chroma flat, the olive artifact.
+          # this interposer supplies the missing video processor.
+          #
+          # built here but not installed here: it has to sit in the d3d12.dll
+          # builtin slot with apple's dll renamed alongside it, and apple's dll
+          # only lands when the gptk payload is deployed on the user's machine.
+          # install-whiskywine.sh --gptk does the swap.
+          mkdir -p Libraries/Wine/lib/gptk-video
+          # -fno-strict-aliasing for the same reason wine builds with it: this is
+          # com vtable code that puns objects between struct types and swaps
+          # vtable pointers through void ***, which is exactly what the aliasing
+          # rules let the compiler assume cannot happen.
+          x86_64-w64-mingw32-gcc -shared -O2 -fno-strict-aliasing \
+            -o Libraries/Wine/lib/gptk-video/d3d12shim.dll \
+            "$GITHUB_WORKSPACE/gptk-video/d3d12shim.c" \
+            "$GITHUB_WORKSPACE/gptk-video/d3d12shim.def" \
+            -I"$GITHUB_WORKSPACE/gptk-video" -luuid -ldxguid
+
+          # wineserver memcmps "Wine builtin DLL" plus its NUL, 17 bytes, at
+          # file offset 0x40. without the stamp the loader finds it in
+          # WINEDLLPATH and ignores it as not a builtin.
+          python3 - Libraries/Wine/lib/gptk-video/d3d12shim.dll <<'EOF'
+          import struct, sys
+          p = sys.argv[1]
+          d = bytearray(open(p, 'rb').read())
+          if struct.unpack_from('<I', d, 0x3c)[0] < 0x60:
+              raise SystemExit('pe header overlaps the builtin marker')
+          d[0x40:0x60] = b'Wine builtin DLL' + b'\0' * 16
+          open(p, 'wb').write(bytes(d))
+          EOF
+          phase "gptk-video: d3d12 video processor interposer"
+
           # whisky's GPTKImporter deploys apple's payload into this directory
           # and symlinks lib/wine/x86_64-unix/{d3d10,d3d11,d3d12,dxgi}.so at
           # libd3dshared.dylib. it must exist in the tarball or the importer
