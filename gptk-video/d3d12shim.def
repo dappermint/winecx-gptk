@@ -1,12 +1,19 @@
+; Ordinals must match apple's d3d12.dll exactly, not just the names. Its export
+; table starts at base 100, and titles that link against a d3d12 import library
+; built from it delay-import by ordinal: Ready or Not asks for #101 and #102
+; (D3D12CreateDevice, D3D12GetDebugInterface) and never mentions them by name.
+; Left implicit, ld numbers these 1-11 alphabetically, the delay-load helper
+; raises 0xC06D007F ERROR_PROC_NOT_FOUND on the first CreateDevice, and the
+; title reports the GPU as having no d3d12 at all.
 EXPORTS
-D3D12CreateDevice = shimD3D12CreateDevice
-D3D12GetDebugInterface = shimD3D12GetDebugInterface
-D3D12SerializeRootSignature = shimD3D12SerializeRootSignature
-D3D12CreateRootSignatureDeserializer = shimD3D12CreateRootSignatureDeserializer
-D3D12SerializeVersionedRootSignature = shimD3D12SerializeVersionedRootSignature
-D3D12CreateVersionedRootSignatureDeserializer = shimD3D12CreateVersionedRootSignatureDeserializer
-D3D12EnableExperimentalFeatures = shimD3D12EnableExperimentalFeatures
-D3D12CoreCreateLayeredDevice = shimD3D12CoreCreateLayeredDevice
-D3D12CoreGetLayeredDeviceSize = shimD3D12CoreGetLayeredDeviceSize
-D3D12CoreRegisterLayers = shimD3D12CoreRegisterLayers
-GetBehaviorValue = shimGetBehaviorValue
+GetBehaviorValue = shimGetBehaviorValue @100
+D3D12CreateDevice = shimD3D12CreateDevice @101
+D3D12GetDebugInterface = shimD3D12GetDebugInterface @102
+D3D12CoreCreateLayeredDevice = shimD3D12CoreCreateLayeredDevice @103
+D3D12CoreGetLayeredDeviceSize = shimD3D12CoreGetLayeredDeviceSize @104
+D3D12CoreRegisterLayers = shimD3D12CoreRegisterLayers @105
+D3D12CreateRootSignatureDeserializer = shimD3D12CreateRootSignatureDeserializer @106
+D3D12CreateVersionedRootSignatureDeserializer = shimD3D12CreateVersionedRootSignatureDeserializer @107
+D3D12EnableExperimentalFeatures = shimD3D12EnableExperimentalFeatures @108
+D3D12SerializeRootSignature = shimD3D12SerializeRootSignature @109
+D3D12SerializeVersionedRootSignature = shimD3D12SerializeVersionedRootSignature @110
