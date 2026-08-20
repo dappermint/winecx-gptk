@@ -72,13 +72,15 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  # the build publishes its own runtime release, which the mirror in
-  # dappermint/Whisky then picks up. nothing here writes to another repo, so no
-  # token beyond the job's own is needed.
-  contents: write
+  # only the publish job below raises this to write. nothing here reaches
+  # another repo, so no token beyond the job's own is needed: the mirror in
+  # dappermint/Whisky pulls the release rather than being pushed to.
+  contents: read
 
 jobs:
   build:
+    outputs:
+      runtime_version: ${{ steps.install.outputs.runtime_version }}
     runs-on: ${{ inputs.runner == 'hosted' && fromJSON('["macos-26"]') || fromJSON('["self-hosted","macOS","ARM64"]') }}
     timeout-minutes: 300
     steps:
@@ -500,6 +502,7 @@ jobs:
           ls payload
 
       - name: install and package
+        id: install
         run: |
           export PATH="$NIX_TOOL_PATH$PATH"
 
@@ -841,6 +844,7 @@ jobs:
           # later steps name the release after it; recomputing the commit count
           # there would drift the moment someone passes runtime_version
           echo "RUNTIME_VERSION=$rv" >> "$GITHUB_ENV"
+          echo "runtime_version=$rv" >> "$GITHUB_OUTPUT"
 
       - name: verify the tree is relocatable
         run: |
@@ -1119,57 +1123,15 @@ jobs:
 
       - name: package
         run: |
+          # the plist rides alongside the tarball so the publish job, and then
+          # the mirror in dappermint/Whisky, can read the version without
+          # decompressing 434MB to reach one file
+          cp Libraries/WhiskyWineVersion.plist .
           tar -czf Libraries.tar.gz Libraries
           shasum -a 256 Libraries.tar.gz | tee Libraries.tar.gz.sha256
           # the stock whisky engine v3.1.1 tarball is 332,438,526 bytes and
           # carries the same addons, so this is the number to compare against
           echo "tarball bytes: $(wc -c < Libraries.tar.gz | tr -d ' ')" | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: publish the runtime release
-        # 108 through 111 were built, gated and then never reached anyone,
-        # because publishing was two manual steps in another repo. this is the
-        # first of them; PublishRuntime.yml in dappermint/Whisky mirrors it to
-        # where the app actually looks.
-        #
-        # only main, and never a fast build: -O0 with no debug info is for
-        # iteration, and a dispatch off a branch is for looking at.
-        if: github.ref == 'refs/heads/main' && inputs.opt != 'fast'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag="runtime-v$RUNTIME_VERSION"
-          sha=$(cut -d' ' -f1 < Libraries.tar.gz.sha256)
-          # ship the stamped plist beside the tarball so the mirror can read the
-          # version, dxvk and dxmt straight off it instead of decompressing
-          # 434MB to reach one file, and so the two can never disagree
-          cp Libraries/WhiskyWineVersion.plist .
-
-          notes=$(printf '%s\n' \
-            "wine $(cat winecx/VERSION 2>/dev/null | sed 's/Wine version //')" \
-            "" \
-            "| | |" \
-            "|---|---|" \
-            "| winecx | \`$WINECX_COMMIT\` |" \
-            "| dxvk | $DXVK_VERSION |" \
-            "| dxmt | $DXMT_VERSION |" \
-            "| moltenvk | $MOLTENVK_VERSION |" \
-            "| sha256 | \`$sha\` |" \
-            "" \
-            "Built from ${{ github.sha }}. The app reads WhiskyWineVersion.plist," \
-            "not this tag, so nothing ships until the mirror runs.")
-
-          # re-running a build of the same tree stamps the same version, so
-          # replacing the assets has to be the normal path rather than an error
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "$tag exists, replacing its assets"
-            gh release upload "$tag" Libraries.tar.gz Libraries.tar.gz.sha256 WhiskyWineVersion.plist --clobber
-            gh release edit "$tag" --notes "$notes"
-          else
-            gh release create "$tag" Libraries.tar.gz Libraries.tar.gz.sha256 WhiskyWineVersion.plist \
-              --title "runtime $RUNTIME_VERSION" --notes "$notes"
-          fi
-          echo "published $tag" >> "$GITHUB_STEP_SUMMARY"
 
       - name: upload runtime
         uses: actions/upload-artifact@v4
@@ -1180,9 +1142,68 @@ jobs:
           path: |
             Libraries.tar.gz
             Libraries.tar.gz.sha256
+            WhiskyWineVersion.plist
           retention-days: 14
           # left at the default 6. tried 0 on the theory that re-deflating an
           # already-gzipped payload is wasted work, and it went the wrong way:
           # 860s for 428MB at the default against 1139s for 434MB at 0. the
           # bottleneck is this runner's uplink at roughly 1MB/s, not its cpu,
           # and level 6 can only ever put fewer bytes on the wire.
+
+  publish:
+    name: publish the runtime release
+    needs: build
+    # only main, and never a fast build: -O0 with no debug info is for
+    # iteration, and a dispatch off a branch is for looking at.
+    if: github.ref == 'refs/heads/main' && inputs.opt != 'fast'
+    # a hosted runner, not the builder: gh is not on the builder's PATH, and
+    # its uplink is ~1MB/s, so pushing the tarball to a release from there
+    # would cost another quarter hour on top of the artifact upload. here the
+    # bytes never leave github.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: whiskywine-gptk-libraries
+
+      - name: cut the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUNTIME_VERSION: ${{ needs.build.outputs.runtime_version }}
+        run: |
+          set -euo pipefail
+          [ -n "$RUNTIME_VERSION" ] || { echo "::error::build did not report a version"; exit 1; }
+
+          sha256sum -c Libraries.tar.gz.sha256
+          tag="runtime-v$RUNTIME_VERSION"
+          sha=$(cut -d' ' -f1 < Libraries.tar.gz.sha256)
+
+          {
+            echo "| | |"
+            echo "|---|---|"
+            echo "| winecx | \`$WINECX_COMMIT\` |"
+            echo "| dxvk | $DXVK_VERSION |"
+            echo "| dxmt | $DXMT_VERSION |"
+            echo "| moltenvk | $MOLTENVK_VERSION |"
+            echo "| sha256 | \`$sha\` |"
+            echo
+            echo "Built from ${{ github.sha }}. The app reads WhiskyWineVersion.plist,"
+            echo "not this tag, so nothing ships until PublishRuntime.yml in"
+            echo "dappermint/Whisky mirrors it."
+          } > notes.md
+
+          # re-running a build of the same tree stamps the same version, so
+          # replacing the assets has to be the normal path rather than an error
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag exists, replacing its assets"
+            gh release upload "$tag" Libraries.tar.gz Libraries.tar.gz.sha256 \
+              WhiskyWineVersion.plist --clobber
+            gh release edit "$tag" --notes-file notes.md
+          else
+            gh release create "$tag" Libraries.tar.gz Libraries.tar.gz.sha256 \
+              WhiskyWineVersion.plist --title "runtime $RUNTIME_VERSION" --notes-file notes.md
+          fi
+          echo "published $tag" >> "$GITHUB_STEP_SUMMARY"
