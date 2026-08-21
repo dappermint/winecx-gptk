@@ -45,6 +45,8 @@ builds run on a self-hosted runner by default (warm ccache, ~15 min); the `hoste
 
 **d3dkmt: adapter identity and segment sizes.** five more KMTQAITYPEs answered honestly from vulkan (adapter type, physical adapter count, pci address, adapter guid, segment sizes), placed above crossover's WDDM 2.7 hack so its fallthrough keeps reaching `default` for non-d3dmetal backends.
 
+**upstream fixes taken ahead of their release.** eight commits from wine master after the 11.15 tag, kept as cherry-picks with their trailers: winemac hiding a stale `client_view` behind gdi drawing on a window that used to be a d3d target, the win32u client-surface refcount race, core audio honouring the period frame size a game asks for instead of the device default, the simd exception codes, and two input fixes. all of them land in 11.16, so drop them at that rebase rather than carrying them forward.
+
 ## history
 
 the wine 10 line (crossover 25.1, series 4.3) proved d3dmetal executes on a self-built runtime and carried the first version of the cross-process bridge as four patches; the wine 11.0 line (crossover 26.3) collapsed them to one. both era tips are tagged, [`lane/wine10-cx25`](../../tree/lane/wine10-cx25) and [`lane/wine11.0-cx26`](../../tree/lane/wine11.0-cx26), and the old `patches/` files are browsable in those trees.
