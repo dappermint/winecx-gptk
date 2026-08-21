@@ -340,9 +340,20 @@ jobs:
               ;;
           esac
           echo "optimisation: $OPT" | tee -a "$GITHUB_STEP_SUMMARY"
-          export CFLAGS="$OPT -Wno-error=implicit-function-declaration $NIX_INCS"
+          # -Werror=unguarded-availability-new is the floor's enforcement: the
+          # builder's SDK is newer than MACOSX_DEPLOYMENT_TARGET, and clang's
+          # answer to an API above the target is a weak link, so the call is a
+          # null pointer on the older OS instead of a link error anyone would
+          # notice. as an error it stops at the line. host flags only, mingw
+          # does not know it.
+          export CFLAGS="$OPT -Wno-error=implicit-function-declaration -Werror=unguarded-availability-new $NIX_INCS"
           export CROSSCFLAGS="$OPT"
           export LDFLAGS="$NIX_LDFS"
+          # the one API that is already above the floor. all three call sites
+          # sit behind #ifdef HAVE_PIPE2 with a pipe + fcntl fallback next to
+          # them, so refusing the detection costs two syscalls per pipe and
+          # makes the self hosted lane's binaries loadable on the floor.
+          export ac_cv_func_pipe2=no
           export ac_cv_lib_soname_freetype="libfreetype.6.dylib"
           export ac_cv_lib_soname_gnutls="libgnutls.30.dylib"
           # wine dlopens MoltenVK by soname; the bundled copy is found via
