@@ -82,6 +82,7 @@ jobs:
   build:
     outputs:
       runtime_version: ${{ steps.install.outputs.runtime_version }}
+      shippable: ${{ steps.make.outputs.shippable }}
     runs-on: ${{ inputs.runner == 'hosted' && fromJSON('["macos-26"]') || fromJSON('["self-hosted","macOS","ARM64"]') }}
     timeout-minutes: 300
     steps:
@@ -385,6 +386,7 @@ jobs:
           echo "gstreamer: found"
 
       - name: make
+        id: make
         env:
           OPT_LEVEL: ${{ inputs.opt }}
         run: |
@@ -399,21 +401,25 @@ jobs:
 
           # pinning the deployment target stops the binaries claiming to be
           # newer, but not configure finding an API the SDK declares and the
-          # floor does not have: v4.0.1 linked pipe2, macOS 27 only, and
-          # ntdll.so would not have loaded on 26 at all. build on a runner whose
-          # SDK matches the floor and this stays quiet.
+          # floor does not have: v4.0.1 linked pipe2, macOS 27 only, weakly, so
+          # ntdll.so loads on 26 and then calls a null pointer at the first
+          # server_pipe. build on a runner whose SDK matches the floor and this
+          # stays quiet.
           if grep -q "has been marked as being introduced in macOS" /tmp/make.log; then
             syms=$(grep -oE "'[a-z_0-9]+' has been marked as being introduced in macOS [0-9.]+" /tmp/make.log | sort -u)
-            # fatal only for a build that could be published. the self hosted lane
-            # is a newer macOS than the floor, so its SDK always offers something,
-            # and failing every push there would cost the fast lane for nothing.
+            # the self hosted lane is a newer macOS than the floor, so its SDK
+            # always offers something and failing every push there would cost the
+            # fast lane for nothing. so the build stays green and hands the
+            # verdict to the publish job instead, which is the step that has to
+            # care. only an explicit release build stops here.
+            echo "shippable=false" >> "$GITHUB_OUTPUT"
             if [ "${OPT_LEVEL:-}" = "release" ]; then
               printf '%s\n' "$syms" | sed 's/^/::error::newer than the floor: /'
               echo "::error::a release cannot link these; build on a runner whose SDK matches $MACOSX_DEPLOYMENT_TARGET"
               exit 1
             fi
             printf '%s\n' "$syms" | sed 's/^/::warning::newer than the floor: /'
-            echo "::warning::not shippable as built; fine to iterate on, a release needs the hosted lane"
+            echo "::warning::not shippable as built; publish will skip this run, a release needs the hosted lane"
           fi
           # per-run numbers, not lifetime ones: this is how we tell whether
           # the restored cache actually did anything
@@ -1154,9 +1160,12 @@ jobs:
   publish:
     name: publish the runtime release
     needs: build
-    # only main, and never a fast build: -O0 with no debug info is for
-    # iteration, and a dispatch off a branch is for looking at.
-    if: github.ref == 'refs/heads/main' && inputs.opt != 'fast'
+    # only main, never a fast build (-O0 with no debug info is for iteration,
+    # and a dispatch off a branch is for looking at), and never a tree that
+    # linked an API above the floor. that last one is how 4.5.0 and then 4.5.114
+    # went out macOS-27-only: the availability check was fatal for opt=release
+    # alone, and a plain push to main publishes at standard.
+    if: github.ref == 'refs/heads/main' && inputs.opt != 'fast' && needs.build.outputs.shippable != 'false'
     # a hosted runner, not the builder: gh is not on the builder's PATH, and
     # its uplink is ~1MB/s, so pushing the tarball to a release from there
     # would cost another quarter hour on top of the artifact upload. here the
