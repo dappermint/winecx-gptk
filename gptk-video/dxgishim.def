@@ -1,0 +1,13 @@
+; Ordinals must match apple's dxgi.dll exactly, for the same reason d3d12shim
+; pins its own: a title that links against an import library built from apple's
+; copy can import by ordinal and never mention the name. Apple's table is base 1
+; and is not in alphabetical order, so leaving these implicit renumbers
+; DXGIGetDebugInterface1 and DXGIDeclareAdapterRemovalSupport past each other.
+EXPORTS
+    CreateDXGIFactory = shimCreateDXGIFactory @1
+    CreateDXGIFactory1 = shimCreateDXGIFactory1 @2
+    CreateDXGIFactory2 = shimCreateDXGIFactory2 @3
+    DXGID3D10CreateDevice = shimDXGID3D10CreateDevice @4
+    DXGID3D10RegisterLayers = shimDXGID3D10RegisterLayers @5
+    DXGIGetDebugInterface1 = shimDXGIGetDebugInterface1 @6
+    DXGIDeclareAdapterRemovalSupport = shimDXGIDeclareAdapterRemovalSupport @7
