@@ -799,6 +799,33 @@ jobs:
           EOF
           phase "gptk-video: d3d12 video processor interposer"
 
+          # d3dmetal's IDXGIAdapter::CheckInterfaceSupport returns S_OK and
+          # writes -1 into the version out-param. engines format that
+          # LARGE_INTEGER as four words and read "65535.65535.65535.65535",
+          # which fails their minimum driver check: helldivers 2 puts a modal
+          # "GPU drivers are out of date" box in front of the game for it.
+          #
+          # this cannot live in the d3d12 shim. measured on helldivers 2:
+          # neither the exe nor game.dll imports d3d12 or dxgi statically, and
+          # the driver check runs before d3d12 is touched, so the d3d12 shim is
+          # not in the process yet and there is no import entry to patch.
+          x86_64-w64-mingw32-gcc -shared -O2 -fno-strict-aliasing \
+            -o Libraries/Wine/lib/gptk-video/dxgishim.dll \
+            "$GITHUB_WORKSPACE/gptk-video/dxgishim.c" \
+            "$GITHUB_WORKSPACE/gptk-video/dxgishim.def" \
+            -luuid -ldxguid
+
+          python3 - Libraries/Wine/lib/gptk-video/dxgishim.dll <<'EOF'
+          import struct, sys
+          p = sys.argv[1]
+          d = bytearray(open(p, 'rb').read())
+          if struct.unpack_from('<I', d, 0x3c)[0] < 0x60:
+              raise SystemExit('pe header overlaps the builtin marker')
+          d[0x40:0x60] = b'Wine builtin DLL' + b'\0' * 16
+          open(p, 'wb').write(bytes(d))
+          EOF
+          phase "gptk-video: dxgi driver version interposer"
+
           # whisky's GPTKImporter deploys apple's payload into this directory
           # and symlinks lib/wine/x86_64-unix/{d3d10,d3d11,d3d12,dxgi}.so at
           # libd3dshared.dylib. it must exist in the tarball or the importer
