@@ -135,16 +135,126 @@ struct nv12
 static struct nv12 pairs[MAX_NV12];
 static unsigned int npairs;
 
+/* Slots are never compacted and the array is static, so the returned pointer
+ * stays valid memory; a dropped slot just stops matching. The one window left is
+ * an app destroying a texture while another thread records a barrier on it, which
+ * is undefined in D3D12 regardless of what we do here. */
 static struct nv12 *find_pair(void *res)
 {
+    struct nv12 *found = NULL;
     unsigned int i;
 
     if (!res || !cs_ready)
         return NULL;
+    EnterCriticalSection(&cs);
     for (i = 0; i < npairs; i++)
         if (pairs[i].luma == res)
-            return &pairs[i];
-    return NULL;
+        {
+            found = &pairs[i];
+            break;
+        }
+    LeaveCriticalSection(&cs);
+    return found;
+}
+
+/* Dropping a pair when the app's texture dies.
+ *
+ * D3D12 releases a private-data interface when the object it is attached to is
+ * destroyed, which is the only destruction notification the API offers. It
+ * matters because fix_barriers runs on the app's own command list for the whole
+ * life of the process: a slot still holding a freed luma pointer keeps matching
+ * once the allocator hands that address to something else, and every barrier on
+ * the new resource is then mirrored onto a chroma texture nobody owns. Helldivers
+ * 2 hit that the moment its intro video ended. */
+static const GUID IID_shim_pair_watch =
+    { 0x6f2a9c31, 0x4b8d, 0x4e57, { 0x9a, 0x0e, 0x7d, 0x35, 0xc1, 0x88, 0x2f, 0x64 } };
+
+struct pair_watch
+{
+    void **vtbl;
+    LONG ref;
+    unsigned int slot;
+};
+
+static void *pair_watch_vtbl[3];
+
+static void pair_drop(unsigned int slot)
+{
+    ID3D12Resource *chroma = NULL;
+
+    if (!cs_ready)
+        return;
+    EnterCriticalSection(&cs);
+    if (slot < npairs && pairs[slot].luma)
+    {
+        /* clear the match first, so find_pair cannot hand this slot out again */
+        pairs[slot].luma = NULL;
+        chroma = pairs[slot].chroma;
+        pairs[slot].chroma = NULL;
+    }
+    LeaveCriticalSection(&cs);
+
+    if (chroma)
+    {
+        LOG("  pair %u dropped with its luma texture\n", slot);
+        ID3D12Resource_Release(chroma);
+    }
+}
+
+static ULONG WINAPI pair_watch_AddRef(void *this_)
+{
+    return InterlockedIncrement(&((struct pair_watch *)this_)->ref);
+}
+
+static ULONG WINAPI pair_watch_Release(void *this_)
+{
+    struct pair_watch *w = this_;
+    LONG ref = InterlockedDecrement(&w->ref);
+
+    if (!ref)
+    {
+        pair_drop(w->slot);
+        HeapFree(GetProcessHeap(), 0, w);
+    }
+    return ref;
+}
+
+static HRESULT WINAPI pair_watch_QueryInterface(void *this_, REFIID riid, void **out)
+{
+    if (!out)
+        return E_POINTER;
+    if (IsEqualGUID(riid, &IID_IUnknown) || IsEqualGUID(riid, &IID_shim_pair_watch))
+    {
+        pair_watch_AddRef(this_);
+        *out = this_;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+/* Attaches a watcher so the slot is dropped when the texture is destroyed. If it
+ * cannot be attached the slot keeps the old never-dropped behaviour rather than
+ * being torn down while the app still holds the texture. */
+static void pair_watch_attach(ID3D12Resource *luma, unsigned int slot)
+{
+    struct pair_watch *w;
+    HRESULT hr;
+
+    if (!(w = HeapAlloc(GetProcessHeap(), 0, sizeof(*w))))
+        return;
+    w->vtbl = pair_watch_vtbl;
+    w->ref = 1;
+    w->slot = slot;
+
+    hr = ID3D12Resource_SetPrivateDataInterface(luma, &IID_shim_pair_watch, (IUnknown *)w);
+    if (SUCCEEDED(hr))
+        pair_watch_Release(w);   /* the texture holds the only reference now */
+    else
+    {
+        LOG("  pair %u has no destruction notification, 0x%08lx\n", slot, hr);
+        HeapFree(GetProcessHeap(), 0, w);
+    }
 }
 
 /* ---- watching a video texture's own methods ---- */
@@ -1570,6 +1680,7 @@ static HRESULT WINAPI shim_CreateCommittedResource(void *dev, const D3D12_HEAP_P
 {
     D3D12_RESOURCE_DESC luma_desc, chroma_desc;
     ID3D12Resource *chroma = NULL;
+    unsigned int slot;
     HRESULT hr;
 
     if (fix_state(state) != state)
@@ -1629,20 +1740,34 @@ static HRESULT WINAPI shim_CreateCommittedResource(void *dev, const D3D12_HEAP_P
         return S_OK;   /* luma alone still beats the game's own fallback */
 
     EnterCriticalSection(&cs);
-    if (npairs < MAX_NV12)
+    if (!pair_watch_vtbl[0])
     {
-        pairs[npairs].luma = *out;
-        pairs[npairs].chroma = chroma;
-        pairs[npairs].width = (UINT)desc->Width;
-        pairs[npairs].height = desc->Height;
-        npairs++;
-        LOG("  pair %u registered\n", npairs - 1);
+        pair_watch_vtbl[0] = (void *)pair_watch_QueryInterface;
+        pair_watch_vtbl[1] = (void *)pair_watch_AddRef;
+        pair_watch_vtbl[2] = (void *)pair_watch_Release;
     }
-    else
+    for (slot = 0; slot < npairs; slot++)
+        if (!pairs[slot].luma)
+            break;
+    if (slot < MAX_NV12)
     {
-        LOG("  pair table full, chroma leaked\n");
+        pairs[slot].luma = *out;
+        pairs[slot].chroma = chroma;
+        pairs[slot].width = (UINT)desc->Width;
+        pairs[slot].height = desc->Height;
+        if (slot == npairs)
+            npairs++;
+        LOG("  pair %u registered\n", slot);
     }
     LeaveCriticalSection(&cs);
+
+    if (slot < MAX_NV12)
+        pair_watch_attach(*out, slot);
+    else
+    {
+        LOG("  pair table full, chroma released\n");
+        ID3D12Resource_Release(chroma);
+    }
     return S_OK;
 }
 
