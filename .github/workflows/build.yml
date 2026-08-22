@@ -45,7 +45,7 @@ env:
   # on this branch and the apply loop is a no-op. the tip also carries eight
   # upstream commits from after the 11.15 tag, see the readme.
   WINECX_REPO: https://github.com/dappermint/winecx.git
-  WINECX_COMMIT: c309c25eb47913114163fd556d6fe28be11ef156
+  WINECX_COMMIT: 3568dee9ae80aebdae379d942ae010bfc6def130
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
   MOLTENVK_VERSION: "1.4.2"
   FAUDIO_VERSION: "26.08"
