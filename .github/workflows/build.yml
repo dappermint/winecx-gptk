@@ -499,9 +499,18 @@ jobs:
           mkdir -p payload
           fetch "https://github.com/Gcenx/DXVK-macOS/releases/download/v$DXVK_VERSION-20230507-repack/dxvk-macOS-async-v$DXVK_VERSION-20230507-repack.tar.gz" \
                 dxvk.tar.gz acd1520ad105d8ef124a09c8e11a259a5dc8bdc565ad18e0e52693f9807b2477
+          # the macos repack ships d3d11 and d3d10core only, no dxgi, because a
+          # 64-bit bottle already has a real DXGI beside it. a 32-bit one does
+          # not: d3dmetal has no i386 half, so syswow64 keeps wine's builtin
+          # dxgi, dxvk's d3d11 loads and then warns "Adapter is not a DXVK
+          # adapter", and the game gets no device. upstream's own dxgi from the
+          # same 1.10.3 release is what pairs with it.
+          fetch "https://github.com/doitsujin/dxvk/releases/download/v$DXVK_VERSION/dxvk-$DXVK_VERSION.tar.gz" \
+                dxvk-upstream.tar.gz 8d1a3c912761b450c879f98478ae64f6f6639e40ce6848170a0f6b8596fd53c6
           fetch "https://github.com/3Shain/dxmt/releases/download/v$DXMT_VERSION/dxmt-v$DXMT_VERSION-builtin.tar.gz" \
                 dxmt.tar.gz 8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d
           tar -xzf dxvk.tar.gz -C payload
+          tar -xzf dxvk-upstream.tar.gz -C payload
           tar -xzf dxmt.tar.gz -C payload
 
           # khronos' own build, not nixpkgs': see the note by MOLTENVK_VERSION.
@@ -578,6 +587,10 @@ jobs:
           dxvk=payload/dxvk-macOS-async-v$DXVK_VERSION-20230507-repack
           mkdir -p Libraries/DXVK Libraries/DXMT
           cp -R "$dxvk/." Libraries/DXVK/
+          # x32 only. the 64-bit half works against the DXGI already in the
+          # prefix, and swapping that one out is a change with nothing asking
+          # for it.
+          cp "payload/dxvk-$DXVK_VERSION/x32/dxgi.dll" Libraries/DXVK/x32/dxgi.dll
           cp -R "$dxmt/x86_64-windows" Libraries/DXMT/x64
           cp -R "$dxmt/i386-windows" Libraries/DXMT/x32
 
@@ -1066,6 +1079,7 @@ jobs:
           # through apple's opengl, frozen at 4.1, and ANGLE reports feature
           # level 9_3 against chromium's hard GLES 3.0 requirement
           [ -f Libraries/DXVK/x64/d3d11.dll ] || { echo "::error::no dxvk payload"; exit 1; }
+          [ -f Libraries/DXVK/x32/dxgi.dll ] || { echo "::error::no 32-bit dxvk dxgi"; exit 1; }
           [ -f Libraries/Wine/lib/wine/x86_64-unix/winemetal.so ] || {
             echo "::error::no dxmt builtin"; exit 1; }
           [ -d Libraries/Wine/lib/external ] || {
