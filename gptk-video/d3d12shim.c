@@ -1543,6 +1543,35 @@ static void WINAPI shim_ExecuteCommandLists(void *queue, UINT count, ID3D12Comma
     ((pfn_ecl)queue_orig[SLOT(ID3D12CommandQueueVtbl, ExecuteCommandLists)])(queue, count, lists);
 }
 
+/* Fence traffic, on for a diagnosis only. D3DMetal's Metal 4 backend drops one
+ * queue's signal on some titles and the game sees a fence stuck one value short,
+ * so this records who asked for what and on which queue. */
+typedef HRESULT (WINAPI *pfn_qsignal)(void *, ID3D12Fence *, UINT64);
+
+static int fence_trace;
+
+static HRESULT WINAPI shim_Signal(void *queue, ID3D12Fence *fence, UINT64 value)
+{
+    HRESULT hr = ((pfn_qsignal)queue_orig[SLOT(ID3D12CommandQueueVtbl, Signal)])(queue, fence, value);
+
+    if (fence_trace)
+        LOG("Signal queue=%p fence=%p value=%llu -> 0x%08lx (completed %llu)\n",
+            queue, (void *)fence, (unsigned long long)value, hr,
+            (unsigned long long)fence->lpVtbl->GetCompletedValue(fence));
+    return hr;
+}
+
+static HRESULT WINAPI shim_QueueWait(void *queue, ID3D12Fence *fence, UINT64 value)
+{
+    HRESULT hr = ((pfn_qsignal)queue_orig[SLOT(ID3D12CommandQueueVtbl, Wait)])(queue, fence, value);
+
+    if (fence_trace)
+        LOG("Wait   queue=%p fence=%p value=%llu -> 0x%08lx (completed %llu)\n",
+            queue, (void *)fence, (unsigned long long)value, hr,
+            (unsigned long long)fence->lpVtbl->GetCompletedValue(fence));
+    return hr;
+}
+
 static void wrap_queue(void *queue)
 {
     void ***obj = queue;
@@ -1556,7 +1585,17 @@ static void wrap_queue(void *queue)
         for (i = 0; i < 19; i++)
             queue_vtbl[i] = queue_orig[i];
         queue_vtbl[SLOT(ID3D12CommandQueueVtbl, ExecuteCommandLists)] = (void *)shim_ExecuteCommandLists;
-        LOG("command queue vtable wrapped\n");
+        {
+            char buf[8];
+            fence_trace = GetEnvironmentVariableA("D3D12SHIM_FENCE_TRACE", buf, sizeof(buf)) > 0
+                    && buf[0] == '1';
+        }
+        if (fence_trace)
+        {
+            queue_vtbl[SLOT(ID3D12CommandQueueVtbl, Signal)] = (void *)shim_Signal;
+            queue_vtbl[SLOT(ID3D12CommandQueueVtbl, Wait)] = (void *)shim_QueueWait;
+        }
+        LOG("command queue vtable wrapped%s\n", fence_trace ? ", fence trace on" : "");
     }
     if (*obj == queue_orig)
         *obj = (void **)queue_vtbl;
