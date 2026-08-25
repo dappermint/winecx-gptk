@@ -40,12 +40,12 @@ on:
 # of 2026, which is this project's deadline for finding another source of
 # x86_64 macOS libraries.
 env:
-  # the wine1115 branch of our winecx import: crossover 26.3's diff merged
-  # onto wine 11.15 with every patch committed in-tree, so patches/ is empty
-  # on this branch and the apply loop is a no-op. the tip also carries eight
-  # upstream commits from after the 11.15 tag, see the readme.
+  # the wine1116 branch of our winecx import: crossover 26.3's diff merged
+  # onto wine 11.16 with every patch committed in-tree, so patches/ is empty
+  # on this branch and the apply loop is a no-op. the eight post-11.15
+  # cherry-picks the previous lane carried landed in 11.16 and are gone.
   WINECX_REPO: https://github.com/dappermint/winecx.git
-  WINECX_COMMIT: 5b45f4564c4f87fa9c0f958733a5e9bb3918a058
+  WINECX_COMMIT: 32df0750efb9e1f421d3b8a579baada415bef24b
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
   MOLTENVK_VERSION: "1.4.2"
   FAUDIO_VERSION: "26.08"
@@ -58,7 +58,7 @@ env:
   # major.minor only. the patch number is the commit count, so it moves on its
   # own and two builds of the same tree still stamp the same version. bump this
   # by hand when a release deserves to be called something new.
-  RUNTIME_SERIES: "4.5"
+  RUNTIME_SERIES: "4.6"
   # Without this every binary carries the minos of whatever built it, so the
   # self-hosted runner stamped macOS 27 onto a runtime dyld then refuses to load
   # anywhere older. Whisky's own floor has to match this number.
@@ -462,6 +462,7 @@ jobs:
             9.4.0)  mono_sha=fd772219aacf46b825fa891a647af4a9ddf8439320101c231918b2037bf13858 ;;
             10.4.1) mono_sha=a16606ef0724202e6a6848ece6e0cbba64d11e2f11aefe744af1d93c6d9f99bb ;;
             11.2.0) mono_sha=c9fb2e2823acf30b000b8806177db0f40751786136dd3f8fb2be7897b1643d06 ;;
+            11.3.0) mono_sha=54a1b0111c3fe4b785eae688af94d27e64995707ad648b6fee8000381b80d298 ;;
             *) echo "no pinned hash for mono $mono_ver"; exit 1 ;;
           esac
           case "$gecko_ver" in

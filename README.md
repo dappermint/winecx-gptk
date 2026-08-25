@@ -1,10 +1,10 @@
 # winecx-gptk
 
-ci build of a gptk-capable wine runtime for the [frankea/Whisky](https://github.com/frankea/Whisky) fork: codeweavers' crossover 26.3 wine changes, rebased onto upstream wine 11.15.
+ci build of a gptk-capable wine runtime for the [frankea/Whisky](https://github.com/frankea/Whisky) fork: codeweavers' crossover 26.3 wine changes, rebased onto upstream wine 11.16.
 
 why: apple's game porting toolkit / d3dmetal payload only executes on crossover-derived wine builds, it patches their unixcall internals at load time. details in [frankea/Whisky#163](https://github.com/frankea/Whisky/issues/163), importer app-side in [frankea/Whisky#164](https://github.com/frankea/Whisky/pull/164).
 
-the source tree is the [`wine1115` branch of dappermint/winecx](https://github.com/dappermint/winecx/tree/wine1115): crossover 26.3's diff (221 files against its wine 11.0 base) merged onto wine 11.15 via a synthetic three-way, with every local patch committed in the tree itself. `patches/` in this repo is empty on purpose; the apply step is a guarded no-op. the crossover diff turned out compact enough that tracking upstream wine releases is sustainable, most of the rebase churn was mechanical.
+the source tree is the [`wine1116` branch of dappermint/winecx](https://github.com/dappermint/winecx/tree/wine1116): crossover 26.3's diff (221 files against its wine 11.0 base) merged onto wine 11.15 via a synthetic three-way, then carried to 11.16 the same way, with every local patch committed in the tree itself. `patches/` in this repo is empty on purpose; the apply step is a guarded no-op. the crossover diff turned out compact enough that tracking upstream wine releases is sustainable, most of the rebase churn was mechanical.
 
 what runs on it, measured on an m5: steam's ui end to end, d3d12 through d3dmetal at feature level 12_2 (binding tier 3, sm 6.6), dxvk d3d11, msync, and the media stack.
 
@@ -39,13 +39,13 @@ builds run on a self-hosted runner by default (warm ccache, ~15 min); the `hoste
 
 ## notable changes carried in the tree
 
-**ntdll: don't call a foreign personality routine as an SEH handler.** `virtual_unwind()` leaves `LDR_DATA_TABLE_ENTRY *module` uninitialised and `LdrFindEntryForAddress` does not touch it on failure, so for a fault in Mach-O code the "personality routine in system library" guard reads garbage and never fires; wine then calls a libunwind personality routine as a windows exception handler and recurses to stack death. still present upstream as of wine 11.15, applied at the moved location there.
+**ntdll: don't call a foreign personality routine as an SEH handler.** `virtual_unwind()` leaves `LDR_DATA_TABLE_ENTRY *module` uninitialised and `LdrFindEntryForAddress` does not touch it on failure, so for a fault in Mach-O code the "personality routine in system library" guard reads garbage and never fires; wine then calls a libunwind personality routine as a windows exception handler and recurses to stack death. still present upstream as of wine 11.16, applied at the moved location there.
 
 **winemac: host cross-process metal layers over CAContext.** wine 11.x grew CALayerHost cross-process swapchains upstream; what it still lacks is child windows and win32 state mirroring for hosted layers, which is what steam's chromium needs. the gpu process renders into another process's child windows; the owner hosts the published tree and re-derives hidden state and z-order from the win32 windows on every WindowPosChanged. without the mirroring, chromium's hidden standby surface covers the live one with one stale black frame, which shows up as a fully rendered steam library under a black layer.
 
 **d3dkmt: adapter identity and segment sizes.** five more KMTQAITYPEs answered honestly from vulkan (adapter type, physical adapter count, pci address, adapter guid, segment sizes), placed above crossover's WDDM 2.7 hack so its fallthrough keeps reaching `default` for non-d3dmetal backends.
 
-**upstream fixes taken ahead of their release.** eight commits from wine master after the 11.15 tag, kept as cherry-picks with their trailers: winemac hiding a stale `client_view` behind gdi drawing on a window that used to be a d3d target, the win32u client-surface refcount race, core audio honouring the period frame size a game asks for instead of the device default, the simd exception codes, and two input fixes. all of them land in 11.16, so drop them at that rebase rather than carrying them forward.
+**upstream fixes taken ahead of their release.** the 11.15 lane carried eight commits from wine master as cherry-picks; all eight landed in 11.16 and were dropped at that rebase. the one currently carried is the winegstreamer non-fixed-caps video pool fix, which is not in 11.16.
 
 ## history
 
