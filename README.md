@@ -47,6 +47,26 @@ builds run on a self-hosted runner by default (warm ccache, ~15 min); the `hoste
 
 **upstream fixes taken ahead of their release.** the 11.15 lane carried eight commits from wine master as cherry-picks; all eight landed in 11.16 and were dropped at that rebase. the one currently carried is the winegstreamer non-fixed-caps video pool fix, which is not in 11.16.
 
+## what happens when rosetta goes
+
+this runtime is x86_64. it runs on apple silicon through rosetta 2, which apple
+has said is largely discontinued in macOS 28. everything here has that shelf
+life, and so does the apple payload it exists to host: d3dmetal ships x86_64
+only, so the d3d12 work, the video interposers and the metalfx bridges cannot
+follow the runtime to arm64 unless apple builds them for it.
+
+the successor is an arm64 runtime running x86 games under FEX, and it already
+works: our own FEX build executes both 64-bit and 32-bit x86 windows code on an
+arm64 mac. what it cannot do is host that process by itself. wine needs the low
+4GB of address space, arm64 reserves all of it as a mandatory pagezero, and the
+only way out is `com.apple.developer.cross-architecture-support`, an entitlement
+apple grants at its own discretion. crossover's arm64 build carries it. a
+self-signed binary carrying the same string is refused at exec.
+
+so the ceiling on this project is not engineering. anyone can write the code and
+we have. whether it reaches users is apple's decision, and worth knowing before
+you build a library around any of this.
+
 ## history
 
 the wine 10 line (crossover 25.1, series 4.3) proved d3dmetal executes on a self-built runtime and carried the first version of the cross-process bridge as four patches; the wine 11.0 line (crossover 26.3) collapsed them to one. both era tips are tagged, [`lane/wine10-cx25`](../../tree/lane/wine10-cx25) and [`lane/wine11.0-cx26`](../../tree/lane/wine11.0-cx26), and the old `patches/` files are browsable in those trees.
