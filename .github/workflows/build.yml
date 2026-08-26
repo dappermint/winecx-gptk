@@ -20,6 +20,13 @@ on:
         options: [self-hosted, hosted]
   push:
     branches: [main]
+    # a push to main publishes, so a readme edit would cut a release whose bits
+    # are identical to the last one bar the version stamp. the manual escape is
+    # "[skip ci]" in the commit subject, but only in that exact spelling, and
+    # relying on remembering it is how the duplicate gets published anyway.
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
 
 # pinned by hand. an unpinned clone makes two builds of the same tree
 # incomparable, which is how a deployment mistake got misread for days as the
