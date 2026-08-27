@@ -52,7 +52,7 @@ env:
   # on this branch and the apply loop is a no-op. the eight post-11.15
   # cherry-picks the previous lane carried landed in 11.16 and are gone.
   WINECX_REPO: https://github.com/dappermint/winecx.git
-  WINECX_COMMIT: 32df0750efb9e1f421d3b8a579baada415bef24b
+  WINECX_COMMIT: 7dbc5b5322a6ef3fb04bdc643c64b188fd641149
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
   MOLTENVK_VERSION: "1.4.2"
   FAUDIO_VERSION: "26.08"
