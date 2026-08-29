@@ -70,7 +70,11 @@ env:
   # Without this every binary carries the minos of whatever built it, so the
   # self-hosted runner stamped macOS 27 onto a runtime dyld then refuses to load
   # anywhere older. Whisky's own floor has to match this number.
-  MACOSX_DEPLOYMENT_TARGET: "26.0"
+  # Mirror note: frankea/Whisky ships with a macOS 15.0 floor, so this mirror
+  # builds at 15.0 on a macos-15 runner, pairing the SDK with the floor. That
+  # pairing is what keeps configure from linking anything the floor lacks
+  # (upstream issue #3 is what happens otherwise).
+  MACOSX_DEPLOYMENT_TARGET: "15.0"
 
 # one build of a ref at a time. the runner is a single machine with one ccache,
 # and now that a green build publishes, two of them racing could put an older
@@ -91,7 +95,7 @@ jobs:
     outputs:
       runtime_version: ${{ steps.install.outputs.runtime_version }}
       shippable: ${{ steps.make.outputs.shippable }}
-    runs-on: ${{ inputs.runner == 'hosted' && fromJSON('["macos-26"]') || fromJSON('["self-hosted","macOS","ARM64"]') }}
+    runs-on: ${{ inputs.runner == 'hosted' && fromJSON('["macos-15"]') || fromJSON('["self-hosted","macOS","ARM64"]') }}
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
