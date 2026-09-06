@@ -11,6 +11,10 @@
  * are loaded at runtime, and the driver check happens before d3d12 is touched
  * at all. So there is no import entry to patch and no earlier hook to take.
  *
+ * The version follows the vendor id the adapter reports, from the same table
+ * win32u writes into the registry DriverVersion, so DXGI and the registry
+ * agree whichever identity D3DMetal or the D3DM_VENDOR_ID knob hands out.
+ *
  * Apple's dxgi.dll is renamed dxgm.dll beside this one, with its PE export
  * directory rewritten to match; see rename-pe-export.py for why the filename
  * alone is not enough.
@@ -41,11 +45,25 @@ static void *real_fn(const char *name)
 /* What wine already publishes for this adapter in
  * HKLM\System\CurrentControlSet\Control\Class\{4d36e968-...}\0000\DriverVersion,
  * so the two agree instead of being separately invented. */
-#define UMD_HIGH ((35u << 16) | 0u)
-#define UMD_LOW  ((15u << 16) | 6094u)
+#define UMD(major, minor, build, rev) \
+    { .HighPart = ((major) << 16) | (minor), .LowPart = ((build) << 16) | (rev) }
 
 typedef HRESULT (WINAPI *pfn_cis)(void *, REFGUID, LARGE_INTEGER *);
 static pfn_cis real_cis;
+
+static LARGE_INTEGER umd_version(UINT vendor)
+{
+    static const LARGE_INTEGER intel = UMD(35, 0, 101, 6314);
+    static const LARGE_INTEGER amd = UMD(35, 0, 21025, 1024);
+    static const LARGE_INTEGER nvidia = UMD(35, 0, 15, 6094);
+
+    switch (vendor)
+    {
+    case 0x8086: return intel;
+    case 0x1002: return amd;
+    default:     return nvidia; /* also what wine answers for apple's 0x106b */
+    }
+}
 
 static HRESULT WINAPI shim_CheckInterfaceSupport(void *adapter, REFGUID guid, LARGE_INTEGER *umd)
 {
@@ -53,8 +71,12 @@ static HRESULT WINAPI shim_CheckInterfaceSupport(void *adapter, REFGUID guid, LA
 
     if (SUCCEEDED(hr) && umd && umd->QuadPart == -1)
     {
-        umd->HighPart = UMD_HIGH;
-        umd->LowPart = UMD_LOW;
+        DXGI_ADAPTER_DESC desc;
+        UINT vendor = 0;
+
+        if (SUCCEEDED(IDXGIAdapter_GetDesc((IDXGIAdapter *)adapter, &desc)))
+            vendor = desc.VendorId;
+        *umd = umd_version(vendor);
     }
     return hr;
 }
@@ -96,7 +118,7 @@ static void patch_adapter_vtable(IUnknown *factory_unk)
     {
         vt[CIS_SLOT] = (void *)shim_CheckInterfaceSupport;
         VirtualProtect(&vt[CIS_SLOT], sizeof(void *), old_prot, &old_prot);
-        LOG("adapter vtable patched, CheckInterfaceSupport answers 35.0.15.6094\n");
+        LOG("adapter vtable patched, CheckInterfaceSupport answers by vendor\n");
     }
     else
     {
