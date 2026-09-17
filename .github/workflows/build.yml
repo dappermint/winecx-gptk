@@ -54,7 +54,7 @@ env:
   WINECX_COMMIT: 565f6386b7aeb7136a0db7e6db7e302b8d56bf11
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
   MOLTENVK_VERSION: "1.4.2"
-  FAUDIO_VERSION: "26.08"
+  FAUDIO_VERSION: "26.09"
   DXVK_VERSION: "1.10.3"
   DXMT_VERSION: "0.80"
   # the runtime stream this build publishes into. lived inline in the stamping
