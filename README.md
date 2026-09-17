@@ -24,6 +24,12 @@ gates that refuse to ship a bad tree, each one added after that exact thing ship
 - **the i386 half is non-empty.** a 64-bit-only tree cannot load `syswow64\ntdll.dll`, so every 32-bit program dies with `c0000135`.
 - **the PE half is stripped.** gcc emits DWARF and nothing removes it; `ntdll.dll` is 3.0MB unstripped against the stock engine's 0.7MB, and everything still runs.
 
+## supported macos versions
+
+this runtime targets the current macos major release and its immediate predecessor: macos 27 and 26, with a deployment floor of 26.0. older versions are outside this release's support scope. this policy applies to this runtime, not automatically to frankea/Whisky.
+
+release acceptance must cover both supported versions, including Steam Store and popups with and without an imported GPTK payload. CI's window-opening check alone does not establish game compatibility.
+
 ## reproducibility
 
 everything the build consumes is pinned in-tree:

@@ -51,7 +51,7 @@ env:
   # onto wine 11.17 with every patch committed in-tree, so patches/ is empty
   # on this branch and the apply loop is a no-op.
   WINECX_REPO: https://github.com/dappermint/winecx.git
-  WINECX_COMMIT: 565f6386b7aeb7136a0db7e6db7e302b8d56bf11
+  WINECX_COMMIT: e0aa380780b73e20fabcfe78fd42713b94929a53
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
   MOLTENVK_VERSION: "1.4.2"
   FAUDIO_VERSION: "26.09"
@@ -93,7 +93,7 @@ jobs:
     runs-on: ${{ inputs.runner == 'hosted' && fromJSON('["macos-26"]') || fromJSON('["self-hosted","macOS","ARM64"]') }}
     timeout-minutes: 300
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # the patch number is the commit count, and a depth-1 checkout counts 1
           fetch-depth: 0
@@ -143,7 +143,7 @@ jobs:
       # need it.
       - name: restore compiler cache
         if: inputs.runner == 'hosted'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.ccache
           key: ccache-${{ env.WINECX_COMMIT }}-${{ github.run_id }}
@@ -156,8 +156,9 @@ jobs:
       # real machine's daemon and store
       - name: install nix
         if: inputs.runner == 'hosted'
-        uses: DeterminateSystems/nix-installer-action@v14
+        uses: DeterminateSystems/nix-installer-action@v23
         with:
+          determinate: false
           extra-conf: |
             extra-platforms = x86_64-darwin
 
@@ -169,7 +170,7 @@ jobs:
 
       - name: verify vendored faudio
         run: |
-          # this branch commits FAudio 26.08 and its portability fixes in the
+          # this branch commits FAudio 26.09 and its portability fixes in the
           # winecx tree itself; overlaying upstream sources here would wipe
           # them. only verify the version matches the pin.
           ver() { grep -oE "FAUDIO_${1}_VERSION[[:space:]]+[0-9]+" \
@@ -1145,6 +1146,9 @@ jobs:
           }
           echo "windows: ok"
 
+          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o flsgetvalue2.exe tests/flsgetvalue2.c
+          WINEDEBUG=-all MVK_CONFIG_LOG_LEVEL=0 ./Libraries/Wine/bin/wine64 flsgetvalue2.exe
+
 
           # and media foundation, which is the only way to tell whether the
           # bundled gstreamer plugins were actually found: a wrong plugin path
@@ -1189,7 +1193,7 @@ jobs:
           echo "tarball bytes: $(wc -c < Libraries.tar.gz | tr -d ' ')" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: upload runtime
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # a fast build says so in its own name, so an -O0 tree cannot be
           # mistaken for a release one three weeks from now
@@ -1222,7 +1226,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: whiskywine-gptk-libraries
 
