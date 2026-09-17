@@ -47,12 +47,11 @@ on:
 # of 2026, which is this project's deadline for finding another source of
 # x86_64 macOS libraries.
 env:
-  # the wine1116 branch of our winecx import: crossover 26.3's diff merged
-  # onto wine 11.16 with every patch committed in-tree, so patches/ is empty
-  # on this branch and the apply loop is a no-op. the eight post-11.15
-  # cherry-picks the previous lane carried landed in 11.16 and are gone.
+  # the wine1117 branch of our winecx import: crossover 26.3's diff merged
+  # onto wine 11.17 with every patch committed in-tree, so patches/ is empty
+  # on this branch and the apply loop is a no-op.
   WINECX_REPO: https://github.com/dappermint/winecx.git
-  WINECX_COMMIT: e1b410a5fdd96a32722a5f2617b5068bd385b7db
+  WINECX_COMMIT: 565f6386b7aeb7136a0db7e6db7e302b8d56bf11
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
   MOLTENVK_VERSION: "1.4.2"
   FAUDIO_VERSION: "26.08"
@@ -66,7 +65,7 @@ env:
   # last changed, so it moves on its own, resets to 0 at a series bump, and two
   # builds of the same tree still stamp the same version. any commit that edits
   # this assignment line resets the count, so touch it only to bump the series.
-  RUNTIME_SERIES: "4.6"
+  RUNTIME_SERIES: "4.7"
   # Without this every binary carries the minos of whatever built it, so the
   # self-hosted runner stamped macOS 27 onto a runtime dyld then refuses to load
   # anywhere older. Whisky's own floor has to match this number.

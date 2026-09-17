@@ -1,10 +1,10 @@
 # winecx-gptk
 
-ci build of a gptk-capable wine runtime for the [frankea/Whisky](https://github.com/frankea/Whisky) fork: codeweavers' crossover 26.3 wine changes, rebased onto upstream wine 11.16.
+ci build of a gptk-capable wine runtime for the [frankea/Whisky](https://github.com/frankea/Whisky) fork: codeweavers' crossover 26.3 wine changes, rebased onto upstream wine 11.17.
 
 why: apple's game porting toolkit / d3dmetal payload only executes on crossover-derived wine builds, it patches their unixcall internals at load time. details in [frankea/Whisky#163](https://github.com/frankea/Whisky/issues/163), importer app-side in [frankea/Whisky#164](https://github.com/frankea/Whisky/pull/164).
 
-the source tree is the [`wine1116` branch of dappermint/winecx](https://github.com/dappermint/winecx/tree/wine1116): crossover 26.3's diff (221 files against its wine 11.0 base) merged onto wine 11.15 via a synthetic three-way, then carried to 11.16 the same way, with every local patch committed in the tree itself. `patches/` in this repo is empty on purpose; the apply step is a guarded no-op. the crossover diff turned out compact enough that tracking upstream wine releases is sustainable, most of the rebase churn was mechanical.
+the source tree is the [`wine1117` branch of dappermint/winecx](https://github.com/dappermint/winecx/tree/wine1117): crossover 26.3's diff (221 files against its wine 11.0 base) merged onto wine 11.15 via a synthetic three-way, then carried to 11.16 and 11.17 the same way, with every local patch committed in the tree itself. `patches/` in this repo is empty on purpose; the apply step is a guarded no-op. the crossover diff turned out compact enough that tracking upstream wine releases is sustainable, most of the rebase churn was mechanical.
 
 what runs on it, measured on an m5: steam's ui end to end, d3d12 through d3dmetal at feature level 12_2 (binding tier 3, sm 6.6), dxvk d3d11, msync, and the media stack.
 
