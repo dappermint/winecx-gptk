@@ -101,7 +101,7 @@ jobs:
       - name: ensure rosetta
         run: |
           /usr/sbin/softwareupdate --install-rosetta --agree-to-license || true
-          arch -x86_64 /usr/bin/true && echo "rosetta ok"
+          /usr/bin/arch -x86_64 /usr/bin/true && echo "rosetta ok"
 
       # compilation cache: harness-only changes rebuild in minutes instead of
       # ~50. compilercheck=content so cache survives runner image updates
