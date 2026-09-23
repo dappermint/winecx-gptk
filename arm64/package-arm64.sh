@@ -10,7 +10,7 @@
 set -euo pipefail
 
 VERSION="${1:?version, e.g. 5.1.0}"
-BASE_ID="${2:-whisky-arm64-5.0.0}"
+BASE_ID="${2:-whisky-arm64-5.1.1}"
 B="${B:-/Volumes/Wine/localdev/build-arm64-1117}"
 MONO="${MONO:-/Volumes/Wine/scratch/wine-mono-11.3.0-arm64.tar.xz}"
 RUNTIMES="$HOME/Library/Application Support/com.dappermint.WhiskyPreview/Runtimes"
