@@ -44,7 +44,7 @@ dxvk 1.10.3's d3d9 cannot create a device on moltenvk.
 | game | kosmickrisp + dxvk 3.1.1 | wined3d |
 |---|---|---|
 | portal (build 19017868), `testchmb_a_13`, 1280x720, vsync off | renders correctly; mean 72.3 fps, min 27.1, max 99.3 | mean 51.1 fps, min 4.7, max 107.3 |
-| sonic adventure dx (build 411939) | d3d9 device created; the game then needs exclusive fullscreen at 1920x1080, the mode change fails and it stays black | same failure |
+| sonic adventure dx (build 411939), 1408x881, 30 fps engine cap | renders correctly; mean 26.8 fps, min 9.1, max 30.3 | mean 10.9 fps, min 0.8, max 16.9 |
 
 the portal runs were not scene-matched: there was input during both, so the
 views differ and the averages are indicative, not a benchmark. a source
@@ -52,10 +52,13 @@ timedemo would make it repeatable. source resolves `d3d9.dll` from `bin/`, not
 beside `hl2.exe`; a dll placed only beside the exe silently falls back to
 wined3d.
 
-sonic adventure dx's failure is the host's display-mode change, not the
-driver: wined3d fails identically, and winemac has no virtual desktop to work
-around it. running its `AppLauncher.exe` once to pick windowed mode is the way
-past it.
+sonic adventure dx reads `system_config.xml` from its install directory. with
+no file it asks for exclusive fullscreen at 1920x1080; when the display has no
+such mode the change fails and it stays black, on wined3d and dxvk alike, so
+that was never the driver. its `AppLauncher.exe` writes the file for the
+current desktop mode on first run, and after that both backends render. the
+launcher draws with d3d9 too, so it also needs a working d3d9. its runs were
+not scene-matched either.
 
 evidence is screenshots and game logs. no comparison with moltenvk yet; moltenvk has no
 working 32-bit d3d9 path to compare against.
