@@ -33,8 +33,32 @@ d3d10/d3d11 stream output is unavailable.
 | hades | native vulkan (`x64Vk`) | renders gameplay |
 | peak (steam build 25306743, unity 6000.3.15f1) | native vulkan (`-force-vulkan`) | reached gameplay in one of two runs; the other stayed black after steam and eos login. moltenvk reached gameplay in the same setup. cause not yet found |
 
-evidence is screenshots and game logs. no frame-time or performance comparison
-with moltenvk has been made yet.
+## d3d9 games
+
+32-bit, so dxvk's x32 dlls under wow64. frame rates come from wine's `fps`
+debug channel, which traces vulkan presents (dxvk) and wined3d presents alike,
+so both backends are measured the same way. wined3d is the baseline because it
+is the only 32-bit d3d9 path whisky has today: d3dmetal has no i386 half, and
+dxvk 1.10.3's d3d9 cannot create a device on moltenvk.
+
+| game | kosmickrisp + dxvk 3.1.1 | wined3d |
+|---|---|---|
+| portal (build 19017868), `testchmb_a_13`, 1280x720, vsync off | renders correctly; mean 72.3 fps, min 27.1, max 99.3 | mean 51.1 fps, min 4.7, max 107.3 |
+| sonic adventure dx (build 411939) | d3d9 device created; the game then needs exclusive fullscreen at 1920x1080, the mode change fails and it stays black | same failure |
+
+the portal runs were not scene-matched: there was input during both, so the
+views differ and the averages are indicative, not a benchmark. a source
+timedemo would make it repeatable. source resolves `d3d9.dll` from `bin/`, not
+beside `hl2.exe`; a dll placed only beside the exe silently falls back to
+wined3d.
+
+sonic adventure dx's failure is the host's display-mode change, not the
+driver: wined3d fails identically, and winemac has no virtual desktop to work
+around it. running its `AppLauncher.exe` once to pick windowed mode is the way
+past it.
+
+evidence is screenshots and game logs. no comparison with moltenvk yet; moltenvk has no
+working 32-bit d3d9 path to compare against.
 
 ## known gaps
 
