@@ -1209,6 +1209,54 @@ jobs:
             exit 1
           }
 
+      - name: probe the experimental kosmickrisp driver
+        if: env.KOSMICKRISP_ENABLED == 'true'
+        run: |
+          # same shape as the window check: build the probe, run it in a fresh
+          # prefix, refuse the tree if the driver cannot create a device. the
+          # probes refuse a fallback icd themselves, so this tests kosmickrisp
+          # and nothing else. the host probe runs from a copy in a path with
+          # spaces, the way a relocated runtime is found in a bottle.
+          headers="$RUNNER_TEMP/kosmickrisp-build/headers-install/include"
+          mkdir -p kosmickrisp-probes
+          relocated="$RUNNER_TEMP/kosmickrisp relocated"
+          rm -rf "$relocated"; mkdir -p "$relocated"
+          cp -R Libraries/Wine/lib/kosmickrisp "$relocated/driver"
+          /usr/bin/clang -arch x86_64 -O2 -Wall -Wextra -Werror -I"$headers" \
+            tests/kosmickrisp_probe.c -o kosmickrisp-probes/host-probe
+          VK_DRIVER_FILES="$relocated/driver/kosmickrisp_icd.json" \
+            kosmickrisp-probes/host-probe "$relocated/driver/libvulkan.1.dylib" \
+            > kosmickrisp-probes/host.txt 2>&1 || { cat kosmickrisp-probes/host.txt; exit 1; }
+
+          export PATH="$NIX_TOOL_PATH$PATH"
+          export WINEPREFIX="$PWD/kosmickrisp-prefix"
+          export WINEDLLOVERRIDES="mscoree=d;mshtml=d"
+          WINEDEBUG=-all ./Libraries/Wine/bin/wine64 wineboot -u >/dev/null 2>&1 || true
+          for target in x86_64 i686; do
+            "$target-w64-mingw32-gcc" -O2 -Wall -Wextra -Werror -I"$headers" \
+              tests/kosmickrisp_probe.c -o "kosmickrisp-probes/$target.exe"
+            WINEDEBUG=-all ./Libraries/Wine/bin/wine-kosmickrisp \
+              "kosmickrisp-probes/$target.exe" --present > "kosmickrisp-probes/$target.txt" 2>&1 || {
+              echo "::error::kosmickrisp $target probe failed"
+              tail -20 "kosmickrisp-probes/$target.txt"
+              exit 1
+            }
+          done
+          grep -hE '^(device|api|geometryShader)=' kosmickrisp-probes/x86_64.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "kosmickrisp: host, x86_64 and i686 probes passed" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: upload kosmickrisp probe logs
+        if: always() && env.KOSMICKRISP_ENABLED == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: kosmickrisp-probes
+          path: |
+            kosmickrisp-probes/*.txt
+            Libraries/Wine/lib/kosmickrisp/SOURCE.txt
+            Libraries/Wine/lib/kosmickrisp/BUILD-TOOLS.txt
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: package
         run: |
           # the plist rides alongside the tarball so the publish job, and then
