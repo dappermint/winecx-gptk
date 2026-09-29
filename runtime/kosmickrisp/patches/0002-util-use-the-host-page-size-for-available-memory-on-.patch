@@ -1,0 +1,42 @@
+From 95942eac289deef980fe93fb102b3cd0a000b43d Mon Sep 17 00:00:00 2001
+From: Nilton Perim Neto <niltonperimneto@gmail.com>
+Date: Tue, 29 Sep 2026 13:26:09 -0300
+Subject: [PATCH] util: use the host page size for available memory on macOS
+
+host_statistics64 counts pages in the kernel's page size. An x86_64
+process under Rosetta on Apple Silicon sees PAGE_SIZE and vm_page_size
+as 4 KiB while the kernel counts 16 KiB pages, so
+os_get_available_system_memory returned a quarter of the free plus
+inactive memory. host_page_size() reports the kernel's page size in
+both x86_64 and arm64 processes.
+
+Vulkan drivers derive VK_EXT_memory_budget from this through
+vk_physical_device_heap_budget_from_system. KosmicKrisp built for
+x86_64 reported a 281 MiB budget on a 5.33 GiB heap, which DXVK uses
+for eviction and allocation decisions.
+
+Signed-off-by: Nilton Perim Neto <niltonperimneto@gmail.com>
+---
+ src/util/os_misc.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/util/os_misc.c b/src/util/os_misc.c
+index 5060266..af01e31 100644
+--- a/src/util/os_misc.c
++++ b/src/util/os_misc.c
+@@ -472,7 +472,14 @@ os_get_available_system_memory(uint64_t *size)
+       return false;
+    }
+ 
+-   *size = ((uint64_t)vm_stats.free_count + (uint64_t)vm_stats.inactive_count) * PAGE_SIZE;
++   /* The counts are in host kernel pages. Under Rosetta that is 16 KiB,
++    * while PAGE_SIZE and vm_page_size in an x86_64 process say 4 KiB, which
++    * made the result a quarter of the real value. */
++   vm_size_t page_size;
++   if (host_page_size(mach_host_self(), &page_size) != KERN_SUCCESS)
++      return false;
++
++   *size = ((uint64_t)vm_stats.free_count + (uint64_t)vm_stats.inactive_count) * page_size;
+    return true;
+ #else
+    return false;
