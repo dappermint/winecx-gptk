@@ -8,6 +8,8 @@ the source tree is the [`wine1117` branch of dappermint/winecx](https://github.c
 
 what runs on it, measured on an m5: steam's ui end to end, d3d12 through d3dmetal at feature level 12_2 (binding tier 3, sm 6.6), dxvk d3d11, msync, and the media stack.
 
+an experimental, opt-in lane bundles kosmickrisp as an alternative vulkan driver for upstream dxvk and native vulkan games, see [docs/kosmickrisp.md](docs/kosmickrisp.md). off by default and never published.
+
 what the workflow does:
 
 - clones winecx at the pinned commit, builds the unix half for x86_64 under rosetta
