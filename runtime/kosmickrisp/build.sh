@@ -24,6 +24,14 @@ checkout() {
 checkout https://github.com/shadexternals/mesa-kosmickrisp.git "$KOSMICKRISP_BUILD_COMMIT" "$work/recipe"
 git -C "$work/recipe" submodule update --init --recursive --depth=1
 [ "$(git -C "$work/recipe/externals/mesa" rev-parse HEAD)" = "$KOSMICKRISP_MESA_COMMIT" ]
+# Local driver changes on top of the pinned Mesa. Reset first so a reused work
+# directory never carries an earlier application; a patch that no longer
+# applies fails the build.
+git -C "$work/recipe/externals/mesa" reset --hard --quiet "$KOSMICKRISP_MESA_COMMIT"
+for patch in "$script_dir"/patches/*.patch; do
+    [ -e "$patch" ] || continue
+    git -C "$work/recipe/externals/mesa" apply --index "$patch"
+done
 checkout https://github.com/KhronosGroup/Vulkan-Loader.git "$VULKAN_LOADER_COMMIT" "$work/loader"
 checkout https://github.com/KhronosGroup/Vulkan-Headers.git "$VULKAN_HEADERS_COMMIT" "$work/headers"
 
@@ -92,6 +100,10 @@ if [ -f "$work/recipe/externals/mesa/subprojects/zlib-1.3.1/README" ]; then
     cp "$work/recipe/externals/mesa/subprojects/zlib-1.3.1/README" "$output/licenses/zlib.txt"
 fi
 cp "$script_dir/pins.env" "$output/SOURCE.txt"
+for patch in "$script_dir"/patches/*.patch; do
+    [ -e "$patch" ] || continue
+    echo "PATCH=$(basename "$patch") $(shasum -a 256 "$patch" | cut -d' ' -f1)"
+done >> "$output/SOURCE.txt"
 {
     /usr/bin/clang --version
     cmake --version
