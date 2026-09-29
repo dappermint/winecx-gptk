@@ -18,6 +18,10 @@ on:
         type: choice
         default: self-hosted
         options: [self-hosted, hosted]
+      kosmickrisp:
+        description: "also bundle the experimental x86_64 kosmickrisp vulkan driver; never publishes"
+        type: boolean
+        default: false
   push:
     branches: [main]
     # a push to main publishes, so a readme edit would cut a release whose bits
@@ -47,6 +51,9 @@ on:
 # of 2026, which is this project's deadline for finding another source of
 # x86_64 macOS libraries.
 env:
+  # the kosmickrisp lane is dispatch-only: a push never builds it and a tree
+  # carrying it never publishes
+  KOSMICKRISP_ENABLED: ${{ inputs.kosmickrisp == true }}
   # the wine1117 branch of our winecx import: crossover 26.3's diff merged
   # onto wine 11.17 with every patch committed in-tree, so patches/ is empty
   # on this branch and the apply loop is a no-op.
@@ -88,6 +95,7 @@ permissions:
 jobs:
   build:
     outputs:
+      kosmickrisp: ${{ env.KOSMICKRISP_ENABLED }}
       runtime_version: ${{ steps.install.outputs.runtime_version }}
       shippable: ${{ steps.make.outputs.shippable }}
     runs-on: ${{ inputs.runner == 'hosted' && fromJSON('["macos-26"]') || fromJSON('["self-hosted","macOS","ARM64"]') }}
@@ -189,6 +197,19 @@ jobs:
             echo "applying $(basename "$p")"
             git -C winecx apply --verbose "$p"
           done
+
+      - name: build the experimental kosmickrisp driver
+        if: env.KOSMICKRISP_ENABLED == 'true'
+        timeout-minutes: 60
+        run: |
+          python3 -m unittest discover -s tests -p 'test_kosmickrisp*.py' -v
+          brew install -q cmake ninja pkg-config llvm spirv-tools spirv-llvm-translator libclc python@3.13
+          # mesa's configure needs python >= 3.10; the system one is 3.9
+          "$(brew --prefix python@3.13)/bin/python3.13" -m venv "$RUNNER_TEMP/kosmickrisp-python"
+          source "$RUNNER_TEMP/kosmickrisp-python/bin/activate"
+          python3 -m pip install -q meson==1.9.1 mako==1.3.10 packaging==25.0 PyYAML==6.0.3
+          export PATH="$(brew --prefix llvm)/bin:$PATH"
+          bash runtime/kosmickrisp/build.sh "$RUNNER_TEMP/kosmickrisp-build" "$PWD/payload/kosmickrisp"
 
       # gcc, not llvm-mingw. measured 2026-08-04 by module bisection: with a
       # kernelbase.dll built by llvm-mingw, steam never completes its CM login,
@@ -902,6 +923,14 @@ jobs:
           echo "RUNTIME_VERSION=$rv" >> "$GITHUB_ENV"
           echo "runtime_version=$rv" >> "$GITHUB_OUTPUT"
 
+      - name: install the experimental kosmickrisp driver
+        if: env.KOSMICKRISP_ENABLED == 'true'
+        run: |
+          # beside wine rather than in lib/external, so nothing picks it up
+          # unless a program is started through wine-kosmickrisp
+          cp -R payload/kosmickrisp Libraries/Wine/lib/kosmickrisp
+          install -m 755 runtime/kosmickrisp/wine-kosmickrisp Libraries/Wine/bin/wine-kosmickrisp
+
       - name: verify the tree is relocatable
         run: |
           # every build up to rt7 shipped dylibs whose own id was a /nix/store
@@ -1197,7 +1226,7 @@ jobs:
         with:
           # a fast build says so in its own name, so an -O0 tree cannot be
           # mistaken for a release one three weeks from now
-          name: whiskywine-gptk-libraries${{ inputs.opt == 'fast' && '-fast-unoptimised' || '' }}
+          name: whiskywine-gptk-libraries${{ env.KOSMICKRISP_ENABLED == 'true' && '-kosmickrisp-experimental' || '' }}${{ inputs.opt == 'fast' && '-fast-unoptimised' || '' }}
           path: |
             Libraries.tar.gz
             Libraries.tar.gz.sha256
@@ -1217,7 +1246,7 @@ jobs:
     # linked an API above the floor. that last one is how 4.5.0 and then 4.5.114
     # went out macOS-27-only: the availability check was fatal for opt=release
     # alone, and a plain push to main publishes at standard.
-    if: github.ref == 'refs/heads/main' && inputs.opt != 'fast' && needs.build.outputs.shippable != 'false'
+    if: github.ref == 'refs/heads/main' && needs.build.outputs.kosmickrisp != 'true' && inputs.opt != 'fast' && needs.build.outputs.shippable != 'false'
     # a hosted runner, not the builder: gh is not on the builder's PATH, and
     # its uplink is ~1MB/s, so pushing the tarball to a release from there
     # would cost another quarter hour on top of the artifact upload. here the
