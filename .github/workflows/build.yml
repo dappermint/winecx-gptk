@@ -1245,6 +1245,36 @@ jobs:
           grep -hE '^(device|api|geometryShader)=' kosmickrisp-probes/x86_64.txt | tee -a "$GITHUB_STEP_SUMMARY"
           echo "kosmickrisp: host, x86_64 and i686 probes passed" | tee -a "$GITHUB_STEP_SUMMARY"
 
+          # upstream dxvk against the driver: the dlls sit beside a copy of each
+          # d3d probe with native-only overrides, so a fallback to the macos
+          # fork or wined3d cannot pass. dxvk's own log must name the version.
+          source runtime/kosmickrisp/pins.env
+          curl -fsSL --retry 3 -o kosmickrisp-probes/dxvk.tar.gz \
+            "https://github.com/doitsujin/dxvk/releases/download/v$DXVK_TEST_VERSION/dxvk-$DXVK_TEST_VERSION.tar.gz"
+          echo "$DXVK_TEST_SHA256  kosmickrisp-probes/dxvk.tar.gz" | shasum -a 256 -c -
+          tar -xzf kosmickrisp-probes/dxvk.tar.gz -C kosmickrisp-probes
+          for pair in x86_64:x64 i686:x32; do
+            target=${pair%%:*} dlls=${pair##*:} dir="kosmickrisp-probes/dxvk-$target"
+            mkdir -p "$dir"
+            cp "kosmickrisp-probes/dxvk-$DXVK_TEST_VERSION/$dlls/"*.dll "$dir/"
+            "$target-w64-mingw32-gcc" -O2 tests/d3d11feat.c -ld3d11 -ldxgi -ldxguid -luuid -o "$dir/d3d11.exe"
+            "$target-w64-mingw32-gcc" -O2 tests/d3d9feat.c -ld3d9 -o "$dir/d3d9.exe"
+            for api in d3d9 d3d11; do
+              marker="[ ok ] D3D11CreateDevice"
+              [ "$api" = d3d9 ] && marker="[ ok ] CreateDevice D3DDEVTYPE_HAL"
+              ( cd "$dir" && WINEDLLOVERRIDES="d3d9,d3d11,dxgi=n;mscoree=d;mshtml=d" \
+                  DXVK_LOG_LEVEL=info DXVK_LOG_PATH="$PWD" WINEDEBUG=-all \
+                  "$GITHUB_WORKSPACE/Libraries/Wine/bin/wine-kosmickrisp" "./$api.exe" > "$api.txt" 2>&1 ) || true
+              if grep -qF "$marker" "$dir/$api.txt" && cat "$dir/${api}_"*.log 2>/dev/null | grep -q "DXVK: v$DXVK_TEST_VERSION"; then
+                echo "dxvk $DXVK_TEST_VERSION $api $target: $(grep -F "$marker" "$dir/$api.txt")" | tee -a "$GITHUB_STEP_SUMMARY"
+              else
+                echo "::error::dxvk $DXVK_TEST_VERSION $api $target did not create a device on kosmickrisp"
+                cat "$dir/${api}_"*.log 2>/dev/null | grep -E 'Skipping|err:|warn:' | head -10
+                exit 1
+              fi
+            done
+          done
+
       - name: upload kosmickrisp probe logs
         if: always() && env.KOSMICKRISP_ENABLED == 'true'
         uses: actions/upload-artifact@v7
@@ -1252,6 +1282,8 @@ jobs:
           name: kosmickrisp-probes
           path: |
             kosmickrisp-probes/*.txt
+            kosmickrisp-probes/dxvk-*/*.txt
+            kosmickrisp-probes/dxvk-*/*.log
             Libraries/Wine/lib/kosmickrisp/SOURCE.txt
             Libraries/Wine/lib/kosmickrisp/BUILD-TOOLS.txt
           if-no-files-found: warn
