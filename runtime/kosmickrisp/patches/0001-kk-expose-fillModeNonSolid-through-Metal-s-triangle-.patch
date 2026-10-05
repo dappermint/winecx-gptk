@@ -1,0 +1,129 @@
+From 1f168c8384ced826734e0569f18539d98643f091 Mon Sep 17 00:00:00 2001
+From: Nilton Perim Neto <niltonperimneto@gmail.com>
+Date: Tue, 29 Sep 2026 01:24:42 -0300
+Subject: [PATCH] kk: expose fillModeNonSolid through Metal's triangle fill
+ mode
+
+Metal has filled and wireframe triangles, so VK_POLYGON_MODE_LINE maps
+to setTriangleFillMode:MTLTriangleFillModeLines. There is no point fill
+mode, so VK_POLYGON_MODE_POINT is drawn as wireframe as well; this is a
+partial implementation of the feature. Emulated geometry and
+tessellation stages rasterize already expanded triangles, so the mode
+applies to the primitives reaching the rasterizer.
+
+DXVK 3.x requires fillModeNonSolid before it will create an adapter.
+
+Signed-off-by: Nilton Perim Neto <niltonperimneto@gmail.com>
+---
+ src/kosmickrisp/bridge/mtl_encoder.h        |  3 +++
+ src/kosmickrisp/bridge/mtl_encoder.m        | 10 ++++++++++
+ src/kosmickrisp/bridge/mtl_types.h          |  5 +++++
+ src/kosmickrisp/bridge/stubs/mtl_encoder.c  |  6 ++++++
+ src/kosmickrisp/vulkan/kk_cmd_draw.c        | 11 +++++++++++
+ src/kosmickrisp/vulkan/kk_physical_device.c |  3 +++
+ 6 files changed, 38 insertions(+)
+
+diff --git a/src/kosmickrisp/bridge/mtl_encoder.h b/src/kosmickrisp/bridge/mtl_encoder.h
+index 90a4238..65f2018 100644
+--- a/src/kosmickrisp/bridge/mtl_encoder.h
++++ b/src/kosmickrisp/bridge/mtl_encoder.h
+@@ -99,6 +99,9 @@ void mtl_set_front_face_winding(mtl_render_encoder *encoder,
+ 
+ void mtl_set_cull_mode(mtl_render_encoder *encoder, enum mtl_cull_mode mode);
+ 
++void mtl_set_triangle_fill_mode(mtl_render_encoder *encoder,
++                                enum mtl_triangle_fill_mode mode);
++
+ void mtl_set_visibility_result_mode(mtl_render_encoder *encoder,
+                                     enum mtl_visibility_result_mode mode,
+                                     size_t offset);
+diff --git a/src/kosmickrisp/bridge/mtl_encoder.m b/src/kosmickrisp/bridge/mtl_encoder.m
+index 0424743..b356b52 100644
+--- a/src/kosmickrisp/bridge/mtl_encoder.m
++++ b/src/kosmickrisp/bridge/mtl_encoder.m
+@@ -361,6 +361,16 @@
+    }
+ }
+ 
++void
++mtl_set_triangle_fill_mode(mtl_render_encoder *encoder,
++                           enum mtl_triangle_fill_mode mode)
++{
++   @autoreleasepool {
++      id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
++      [enc setTriangleFillMode:(MTLTriangleFillMode)mode];
++   }
++}
++
+ void
+ mtl_set_visibility_result_mode(mtl_render_encoder *encoder,
+                                enum mtl_visibility_result_mode mode,
+diff --git a/src/kosmickrisp/bridge/mtl_types.h b/src/kosmickrisp/bridge/mtl_types.h
+index 05c2b74..137b545 100644
+--- a/src/kosmickrisp/bridge/mtl_types.h
++++ b/src/kosmickrisp/bridge/mtl_types.h
+@@ -236,6 +236,11 @@ enum mtl_cull_mode {
+    MTL_CULL_MODE_BACK = 2,
+ };
+ 
++enum mtl_triangle_fill_mode {
++   MTL_TRIANGLE_FILL_MODE_FILL = 0,
++   MTL_TRIANGLE_FILL_MODE_LINES = 1,
++};
++
+ enum mtl_visibility_result_mode {
+    MTL_VISIBILITY_RESULT_MODE_DISABLED = 0,
+    MTL_VISIBILITY_RESULT_MODE_BOOLEAN = 1,
+diff --git a/src/kosmickrisp/bridge/stubs/mtl_encoder.c b/src/kosmickrisp/bridge/stubs/mtl_encoder.c
+index 7ef9fe8..38995b5 100644
+--- a/src/kosmickrisp/bridge/stubs/mtl_encoder.c
++++ b/src/kosmickrisp/bridge/stubs/mtl_encoder.c
+@@ -179,6 +179,12 @@ mtl_set_cull_mode(mtl_render_encoder *encoder, enum mtl_cull_mode mode)
+ {
+ }
+ 
++void
++mtl_set_triangle_fill_mode(mtl_render_encoder *encoder,
++                           enum mtl_triangle_fill_mode mode)
++{
++}
++
+ void
+ mtl_set_visibility_result_mode(mtl_render_encoder *encoder,
+                                enum mtl_visibility_result_mode mode,
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index 24f05de..ac78fe3 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -1378,6 +1378,17 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
+       }
+    }
+ 
++   /* Metal only has filled and wireframe triangles. Point mode has no
++    * equivalent and is drawn as wireframe too, which is why the non-solid
++    * fill modes are a partial implementation. Emulated geometry and
++    * tessellation rasterize already expanded triangles, so the mode applies
++    * to the primitives the rasterizer sees, as Vulkan specifies. */
++   if (IS_DIRTY(RS_POLYGON_MODE)) {
++      mtl_set_triangle_fill_mode(enc, dyn->rs.polygon_mode == VK_POLYGON_MODE_FILL
++                                         ? MTL_TRIANGLE_FILL_MODE_FILL
++                                         : MTL_TRIANGLE_FILL_MODE_LINES);
++   }
++
+    /* We enable raster discard by setting scissor to size (0, 0) */
+    if (!(dyn->rs.rasterizer_discard_enable || gfx->is_cull_front_and_back) &&
+        (IS_DIRTY(VP_VIEWPORT_COUNT) || IS_DIRTY(VP_VIEWPORTS) ||
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index 613977a..13ebcc5 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -233,6 +233,9 @@ kk_get_device_features(
+       .dualSrcBlend = true,
+       .fragmentStoresAndAtomics = true,
+       .fullDrawIndexUint32 = true,
++      /* Wireframe through Metal's triangle fill mode. Point mode draws as
++       * wireframe, see kk_flush_dynamic_state. */
++      .fillModeNonSolid = true,
+       .geometryShader = true,
+       .imageCubeArray = true,
+       .independentBlend = true,

@@ -1,0 +1,20 @@
+#!/bin/bash
+# Run one program on the bundled KosmicKrisp Vulkan driver instead of
+# MoltenVK. The usual wine/wine64 entry points are untouched.
+#
+# CrossOver's win32u (CW HACK 25909) loads CX_LIBVULKAN as the host Vulkan
+# library, but only while CX_ACTIVE_GRAPHICS_BACKEND is "wined3d". That value
+# selects no Direct3D implementation here: DXVK and native Vulkan programs
+# bring their own, so it only unlocks the loader override.
+set -euo pipefail
+wine_bin=$(cd -- "$(dirname -- "$0")" && pwd -P)
+bundle="$wine_bin/../lib/kosmickrisp"
+for required in libvulkan.1.dylib libvulkan_kosmickrisp.dylib kosmickrisp_icd.json; do
+    [ -f "$bundle/$required" ] || { echo "Missing KosmicKrisp component: $required" >&2; exit 1; }
+done
+export CX_LIBVULKAN="$bundle/libvulkan.1.dylib"
+export CX_ACTIVE_GRAPHICS_BACKEND=wined3d
+export VK_DRIVER_FILES="$bundle/kosmickrisp_icd.json"
+# Inherited driver selection would override the bundled ICD.
+unset VK_ICD_FILENAMES VK_ADD_DRIVER_FILES VK_LOADER_DRIVERS_SELECT VK_LOADER_DRIVERS_DISABLE
+exec "$wine_bin/wine64" "$@"

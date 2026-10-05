@@ -1,0 +1,7 @@
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, std430) buffer Result { uint values[]; } result;
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    result.values[index] = 0xc0de0000u | index;
+}

@@ -18,6 +18,10 @@ on:
         type: choice
         default: self-hosted
         options: [self-hosted, hosted]
+      kosmickrisp:
+        description: "also bundle the experimental x86_64 kosmickrisp vulkan driver; never publishes"
+        type: boolean
+        default: false
   push:
     branches: [main]
     # a push to main publishes, so a readme edit would cut a release whose bits
@@ -47,6 +51,9 @@ on:
 # of 2026, which is this project's deadline for finding another source of
 # x86_64 macOS libraries.
 env:
+  # the kosmickrisp lane is dispatch-only: a push never builds it and a tree
+  # carrying it never publishes
+  KOSMICKRISP_ENABLED: ${{ inputs.kosmickrisp == true }}
   # the wine1117 branch of our winecx import: crossover 26.3's diff merged
   # onto wine 11.17 with every patch committed in-tree, so patches/ is empty
   # on this branch and the apply loop is a no-op.
@@ -88,6 +95,7 @@ permissions:
 jobs:
   build:
     outputs:
+      kosmickrisp: ${{ env.KOSMICKRISP_ENABLED }}
       runtime_version: ${{ steps.install.outputs.runtime_version }}
       shippable: ${{ steps.make.outputs.shippable }}
     runs-on: ${{ inputs.runner == 'hosted' && fromJSON('["macos-26"]') || fromJSON('["self-hosted","macOS","ARM64"]') }}
@@ -189,6 +197,19 @@ jobs:
             echo "applying $(basename "$p")"
             git -C winecx apply --verbose "$p"
           done
+
+      - name: build the experimental kosmickrisp driver
+        if: env.KOSMICKRISP_ENABLED == 'true'
+        timeout-minutes: 60
+        run: |
+          python3 -m unittest discover -s tests -p 'test_kosmickrisp*.py' -v
+          brew install -q cmake ninja pkg-config llvm spirv-tools spirv-llvm-translator libclc python@3.13
+          # mesa's configure needs python >= 3.10; the system one is 3.9
+          "$(brew --prefix python@3.13)/bin/python3.13" -m venv "$RUNNER_TEMP/kosmickrisp-python"
+          source "$RUNNER_TEMP/kosmickrisp-python/bin/activate"
+          python3 -m pip install -q meson==1.9.1 mako==1.3.10 packaging==25.0 PyYAML==6.0.3
+          export PATH="$(brew --prefix llvm)/bin:$PATH"
+          bash runtime/kosmickrisp/build.sh "$RUNNER_TEMP/kosmickrisp-build" "$PWD/payload/kosmickrisp"
 
       # gcc, not llvm-mingw. measured 2026-08-04 by module bisection: with a
       # kernelbase.dll built by llvm-mingw, steam never completes its CM login,
@@ -902,6 +923,14 @@ jobs:
           echo "RUNTIME_VERSION=$rv" >> "$GITHUB_ENV"
           echo "runtime_version=$rv" >> "$GITHUB_OUTPUT"
 
+      - name: install the experimental kosmickrisp driver
+        if: env.KOSMICKRISP_ENABLED == 'true'
+        run: |
+          # beside wine rather than in lib/external, so nothing picks it up
+          # unless a program is started through wine-kosmickrisp
+          cp -R payload/kosmickrisp Libraries/Wine/lib/kosmickrisp
+          install -m 755 runtime/kosmickrisp/wine-kosmickrisp Libraries/Wine/bin/wine-kosmickrisp
+
       - name: verify the tree is relocatable
         run: |
           # every build up to rt7 shipped dylibs whose own id was a /nix/store
@@ -1180,6 +1209,86 @@ jobs:
             exit 1
           }
 
+      - name: probe the experimental kosmickrisp driver
+        if: env.KOSMICKRISP_ENABLED == 'true'
+        run: |
+          # same shape as the window check: build the probe, run it in a fresh
+          # prefix, refuse the tree if the driver cannot create a device. the
+          # probes refuse a fallback icd themselves, so this tests kosmickrisp
+          # and nothing else. the host probe runs from a copy in a path with
+          # spaces, the way a relocated runtime is found in a bottle.
+          headers="$RUNNER_TEMP/kosmickrisp-build/headers-install/include"
+          mkdir -p kosmickrisp-probes
+          relocated="$RUNNER_TEMP/kosmickrisp relocated"
+          rm -rf "$relocated"; mkdir -p "$relocated"
+          cp -R Libraries/Wine/lib/kosmickrisp "$relocated/driver"
+          /usr/bin/clang -arch x86_64 -O2 -Wall -Wextra -Werror -I"$headers" \
+            tests/kosmickrisp_probe.c -o kosmickrisp-probes/host-probe
+          VK_DRIVER_FILES="$relocated/driver/kosmickrisp_icd.json" \
+            kosmickrisp-probes/host-probe "$relocated/driver/libvulkan.1.dylib" \
+            > kosmickrisp-probes/host.txt 2>&1 || { cat kosmickrisp-probes/host.txt; exit 1; }
+
+          export PATH="$NIX_TOOL_PATH$PATH"
+          export WINEPREFIX="$PWD/kosmickrisp-prefix"
+          export WINEDLLOVERRIDES="mscoree=d;mshtml=d"
+          WINEDEBUG=-all ./Libraries/Wine/bin/wine64 wineboot -u >/dev/null 2>&1 || true
+          for target in x86_64 i686; do
+            "$target-w64-mingw32-gcc" -O2 -Wall -Wextra -Werror -I"$headers" \
+              tests/kosmickrisp_probe.c -o "kosmickrisp-probes/$target.exe"
+            WINEDEBUG=-all ./Libraries/Wine/bin/wine-kosmickrisp \
+              "kosmickrisp-probes/$target.exe" --present > "kosmickrisp-probes/$target.txt" 2>&1 || {
+              echo "::error::kosmickrisp $target probe failed"
+              tail -20 "kosmickrisp-probes/$target.txt"
+              exit 1
+            }
+          done
+          grep -hE '^(device|api|geometryShader)=' kosmickrisp-probes/x86_64.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "kosmickrisp: host, x86_64 and i686 probes passed" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          # upstream dxvk against the driver: the dlls sit beside a copy of each
+          # d3d probe with native-only overrides, so a fallback to the macos
+          # fork or wined3d cannot pass. dxvk's own log must name the version.
+          source runtime/kosmickrisp/pins.env
+          curl -fsSL --retry 3 -o kosmickrisp-probes/dxvk.tar.gz \
+            "https://github.com/doitsujin/dxvk/releases/download/v$DXVK_TEST_VERSION/dxvk-$DXVK_TEST_VERSION.tar.gz"
+          echo "$DXVK_TEST_SHA256  kosmickrisp-probes/dxvk.tar.gz" | shasum -a 256 -c -
+          tar -xzf kosmickrisp-probes/dxvk.tar.gz -C kosmickrisp-probes
+          for pair in x86_64:x64 i686:x32; do
+            target=${pair%%:*} dlls=${pair##*:} dir="kosmickrisp-probes/dxvk-$target"
+            mkdir -p "$dir"
+            cp "kosmickrisp-probes/dxvk-$DXVK_TEST_VERSION/$dlls/"*.dll "$dir/"
+            "$target-w64-mingw32-gcc" -O2 tests/d3d11feat.c -ld3d11 -ldxgi -ldxguid -luuid -o "$dir/d3d11.exe"
+            "$target-w64-mingw32-gcc" -O2 tests/d3d9feat.c -ld3d9 -o "$dir/d3d9.exe"
+            for api in d3d9 d3d11; do
+              marker="[ ok ] D3D11CreateDevice"
+              [ "$api" = d3d9 ] && marker="[ ok ] CreateDevice D3DDEVTYPE_HAL"
+              ( cd "$dir" && WINEDLLOVERRIDES="d3d9,d3d11,dxgi=n;mscoree=d;mshtml=d" \
+                  DXVK_LOG_LEVEL=info DXVK_LOG_PATH="$PWD" WINEDEBUG=-all \
+                  "$GITHUB_WORKSPACE/Libraries/Wine/bin/wine-kosmickrisp" "./$api.exe" > "$api.txt" 2>&1 ) || true
+              if grep -qF "$marker" "$dir/$api.txt" && cat "$dir/${api}_"*.log 2>/dev/null | grep -q "DXVK: v$DXVK_TEST_VERSION"; then
+                echo "dxvk $DXVK_TEST_VERSION $api $target: $(grep -F "$marker" "$dir/$api.txt")" | tee -a "$GITHUB_STEP_SUMMARY"
+              else
+                echo "::error::dxvk $DXVK_TEST_VERSION $api $target did not create a device on kosmickrisp"
+                cat "$dir/${api}_"*.log 2>/dev/null | grep -E 'Skipping|err:|warn:' | head -10
+                exit 1
+              fi
+            done
+          done
+
+      - name: upload kosmickrisp probe logs
+        if: always() && env.KOSMICKRISP_ENABLED == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: kosmickrisp-probes
+          path: |
+            kosmickrisp-probes/*.txt
+            kosmickrisp-probes/dxvk-*/*.txt
+            kosmickrisp-probes/dxvk-*/*.log
+            Libraries/Wine/lib/kosmickrisp/SOURCE.txt
+            Libraries/Wine/lib/kosmickrisp/BUILD-TOOLS.txt
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: package
         run: |
           # the plist rides alongside the tarball so the publish job, and then
@@ -1197,7 +1306,7 @@ jobs:
         with:
           # a fast build says so in its own name, so an -O0 tree cannot be
           # mistaken for a release one three weeks from now
-          name: whiskywine-gptk-libraries${{ inputs.opt == 'fast' && '-fast-unoptimised' || '' }}
+          name: whiskywine-gptk-libraries${{ env.KOSMICKRISP_ENABLED == 'true' && '-kosmickrisp-experimental' || '' }}${{ inputs.opt == 'fast' && '-fast-unoptimised' || '' }}
           path: |
             Libraries.tar.gz
             Libraries.tar.gz.sha256
@@ -1217,7 +1326,7 @@ jobs:
     # linked an API above the floor. that last one is how 4.5.0 and then 4.5.114
     # went out macOS-27-only: the availability check was fatal for opt=release
     # alone, and a plain push to main publishes at standard.
-    if: github.ref == 'refs/heads/main' && inputs.opt != 'fast' && needs.build.outputs.shippable != 'false'
+    if: github.ref == 'refs/heads/main' && needs.build.outputs.kosmickrisp != 'true' && inputs.opt != 'fast' && needs.build.outputs.shippable != 'false'
     # a hosted runner, not the builder: gh is not on the builder's PATH, and
     # its uplink is ~1MB/s, so pushing the tarball to a release from there
     # would cost another quarter hour on top of the artifact upload. here the
