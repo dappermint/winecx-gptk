@@ -54,14 +54,14 @@ env:
   # the kosmickrisp lane is dispatch-only: a push never builds it and a tree
   # carrying it never publishes
   KOSMICKRISP_ENABLED: ${{ inputs.kosmickrisp == true }}
-  # the wine1117 branch of our winecx import: crossover 26.3's diff merged
-  # onto wine 11.17 with every patch committed in-tree, so patches/ is empty
+  # the wine1119 branch of our winecx import: crossover 26.3's diff merged
+  # onto wine 11.19 with every patch committed in-tree, so patches/ is empty
   # on this branch and the apply loop is a no-op.
   WINECX_REPO: https://github.com/dappermint/winecx.git
-  WINECX_COMMIT: e0aa380780b73e20fabcfe78fd42713b94929a53
+  WINECX_COMMIT: 5ee1af65283cf7baf162cbab545a696d29206970
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
   MOLTENVK_VERSION: "1.4.2"
-  FAUDIO_VERSION: "26.09"
+  FAUDIO_VERSION: "26.10"
   DXVK_VERSION: "1.10.3"
   DXMT_VERSION: "0.80"
   # the runtime stream this build publishes into. lived inline in the stamping
@@ -72,7 +72,7 @@ env:
   # last changed, so it moves on its own, resets to 0 at a series bump, and two
   # builds of the same tree still stamp the same version. any commit that edits
   # this assignment line resets the count, so touch it only to bump the series.
-  RUNTIME_SERIES: "4.7"
+  RUNTIME_SERIES: "4.8"
   # Without this every binary carries the minos of whatever built it, so the
   # self-hosted runner stamped macOS 27 onto a runtime dyld then refuses to load
   # anywhere older. Whisky's own floor has to match this number.
