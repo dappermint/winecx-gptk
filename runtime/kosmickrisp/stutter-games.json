@@ -1,0 +1,85 @@
+{
+  "sadx": {
+    "name": "Sonic Adventure DX",
+    "bottle_path": "Program Files (x86)/Steam/steamapps/common/Sonic Adventure DX",
+    "executable": "Sonic Adventure DX.exe",
+    "seconds": 150,
+    "skip_seconds": 5,
+    "write_files": {
+      "steam_appid.txt": "71250\n"
+    },
+    "edits": [
+      {
+        "file": "system_config.xml",
+        "old": "windowed=\"0\"",
+        "new": "windowed=\"1\""
+      }
+    ]
+  },
+  "portal2-d3d9": {
+    "name": "Portal 2",
+    "bottle_path": "Program Files (x86)/Steam/steamapps/common/Portal 2",
+    "executable": "portal2.exe",
+    "seconds": 240,
+    "skip_seconds": 0,
+    "arguments": [
+      "-novid",
+      "-sw",
+      "-w",
+      "1280",
+      "-h",
+      "720",
+      "+mat_vsync",
+      "0",
+      "+map",
+      "sp_a1_intro1"
+    ],
+    "steam": true,
+    "steam_appid": 620,
+    "dxvk_dlls": [
+      "d3d9.dll"
+    ],
+    "dll_overrides": "d3d9=n,b",
+    "dxvk_dir": "bin"
+  },
+  "portal2-vulkan": {
+    "name": "Portal 2",
+    "bottle_path": "Program Files (x86)/Steam/steamapps/common/Portal 2",
+    "executable": "portal2.exe",
+    "seconds": 240,
+    "skip_seconds": 0,
+    "arguments": [
+      "-vulkan",
+      "-novid",
+      "-sw",
+      "-w",
+      "1280",
+      "-h",
+      "720",
+      "+mat_vsync",
+      "0",
+      "+map",
+      "sp_a1_intro1"
+    ],
+    "steam": true,
+    "dll_overrides": ""
+  },
+  "skywalker-dx11": {
+    "name": "LEGO Star Wars - The Skywalker Saga",
+    "bottle_path": "Program Files (x86)/Steam/steamapps/common/LEGO Star Wars - The Skywalker Saga",
+    "executable": "LEGOSTARWARSSKYWALKERSAGA_DX11.exe",
+    "seconds": 240,
+    "skip_seconds": 0,
+    "steam": true,
+    "steam_appid": 920210,
+    "dxvk_arch": "x64",
+    "dxvk_dlls": [
+      "d3d11.dll",
+      "dxgi.dll"
+    ],
+    "dll_overrides": "d3d11,dxgi=n,b",
+    "write_files": {
+      "steam_appid.txt": "920210\n"
+    }
+  }
+}
