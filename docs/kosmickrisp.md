@@ -31,6 +31,13 @@ the bundle records what built it.
 `libvulkan_kosmickrisp.dylib`, `kosmickrisp_icd.json` (relative library path),
 zlib when mesa needs it, licenses, and `SOURCE.txt` with the pins.
 
+`DXVK3/x32/` and `DXVK3/x64/` contain upstream DXVK 3.1.1's `d3d8.dll`,
+`d3d9.dll`, `d3d10core.dll`, `d3d11.dll`, and `dxgi.dll`. The payload includes
+`LICENSE.txt`, `SOURCE.txt` with the release URL and verified archive hash,
+and `SHA256SUMS` for the packaged files. The experimental CI probes use these
+same DLLs. This payload is separate from the existing `DXVK/` backend; bottle
+installation and an app backend selector are follow-up work.
+
 ```sh
 WINEPREFIX=/path/to/prefix Libraries/Wine/bin/wine-kosmickrisp program.exe
 ```
