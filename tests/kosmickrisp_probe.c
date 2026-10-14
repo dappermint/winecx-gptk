@@ -95,6 +95,10 @@ int main(int argc, char **argv)
             VK_API_VERSION_MAJOR(props.properties.apiVersion),
             VK_API_VERSION_MINOR(props.properties.apiVersion),
             VK_API_VERSION_PATCH(props.properties.apiVersion), props.properties.limits.maxPushConstantsSize);
+        printf("pipelineCacheUUID=");
+        for (unsigned j = 0; j < VK_UUID_SIZE; ++j)
+            printf("%02x", props.properties.pipelineCacheUUID[j]);
+        putchar('\n');
         printf("geometryShader=%u tessellationShader=%u shaderInt64=%u fillModeNonSolid=%u\n",
             features.features.geometryShader, features.features.tessellationShader,
             features.features.shaderInt64, features.features.fillModeNonSolid);

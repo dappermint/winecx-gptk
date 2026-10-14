@@ -1,0 +1,12 @@
+diff --git a/src/dxvk/dxvk_device.cpp b/src/dxvk/dxvk_device.cpp
+index 0221825..7d9206c 100644
+--- a/src/dxvk/dxvk_device.cpp
++++ b/src/dxvk/dxvk_device.cpp
+@@ -826,6 +826,7 @@ namespace dxvk {
+      && !m_adapter->matchesDriver(VK_DRIVER_ID_MESA_NVK)
+      && !m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)
+      && !m_adapter->matchesDriver(VK_DRIVER_ID_MESA_HONEYKRISP)
++     && !m_adapter->matchesDriver(VK_DRIVER_ID_MESA_KOSMICKRISP)
+      && !m_adapter->matchesDriver(VK_DRIVER_ID_MESA_LLVMPIPE)
+      && !m_adapter->matchesDriver(VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA))
+       m_shaderOptions.flags.set(DxvkShaderCompileFlag::LowerConstantArrays);

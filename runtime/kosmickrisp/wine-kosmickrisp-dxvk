@@ -1,0 +1,36 @@
+#!/bin/bash
+set -euo pipefail
+wine_bin=$(cd -- "$(dirname -- "$0")" && pwd -P)
+runtime_root=$(cd -- "$wine_bin/../.." && pwd -P)
+helper="$wine_bin/../share/kosmickrisp/dxvk-prefix.py"
+prefix=${WINEPREFIX:?Set WINEPREFIX to the selected, initialized Wine bottle}
+case "${1:-}" in
+    --install-prefix)
+        shift
+        exec python3 "$helper" install "$prefix" "$runtime_root/DXVK3" "$@"
+        ;;
+    --restore-prefix)
+        shift
+        exec python3 "$helper" restore "$prefix" "$@"
+        ;;
+    --status-prefix)
+        shift
+        exec python3 "$helper" status "$prefix" "$@"
+        ;;
+esac
+python3 "$helper" status "$prefix" >/dev/null || {
+    echo "DXVK setup is missing, modified or interrupted; use --status-prefix, --install-prefix or --restore-prefix." >&2
+    exit 1
+}
+cache_root="$prefix/drive_c/ShaderCaches/kosmickrisp"
+if [ -z "${MESA_SHADER_CACHE_DIR+x}" ]; then
+    mkdir -p "$cache_root/mesa"
+    export MESA_SHADER_CACHE_DIR="$cache_root/mesa"
+fi
+if [ -z "${DXVK_SHADER_CACHE_PATH+x}" ]; then
+    mkdir -p "$cache_root/dxvk"
+    export DXVK_SHADER_CACHE_PATH='C:\ShaderCaches\kosmickrisp\dxvk'
+fi
+export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}d3d8,d3d9,d3d10core,d3d11,dxgi=n"
+unset WINE_VULKAN_LIBRARY
+exec "$wine_bin/wine-kosmickrisp" "$@"

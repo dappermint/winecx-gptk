@@ -120,6 +120,28 @@ class StutterTests(unittest.TestCase):
             self.assertEqual(len(result["rejections"]), 1)
             self.assertEqual(result["errors"], 1)
 
+    def test_gpl_capability_is_distinct_from_enabled_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)
+            log = path / "game_d3d9.log"
+            log.write_text("info:  DXVK: v3.1.1\n"
+                           "info:  Effective configuration:\n"
+                           "info:    dxvk.enableGraphicsPipelineLibrary = False\n"
+                           "info:  Creating device:\n"
+                           "info:    Driver   : KosmicKrisp 26.2.99\n"
+                           "info:  Enabled extensions:\n"
+                           "info:    VK_EXT_graphics_pipeline_library\n"
+                           "info:  Enabled features:\n"
+                           "info:  Graphics pipeline libraries supported\n"
+                           "info:  Binding model: Legacy\n")
+            report = stutter.parse_dxvk_logs(path)
+            self.assertTrue(report["backend_verified"])
+            self.assertTrue(report["gpl"])
+            self.assertFalse(report["gpl_enabled"])
+            self.assertEqual(report["binding_models"], ["Legacy"])
+            log.write_text("info:    Driver   : MoltenVK 1.4\n")
+            self.assertFalse(stutter.parse_dxvk_logs(path)["backend_verified"])
+
 
 if __name__ == "__main__":
     unittest.main()

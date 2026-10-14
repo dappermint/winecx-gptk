@@ -16,5 +16,5 @@ export CX_LIBVULKAN="$bundle/libvulkan.1.dylib"
 export CX_ACTIVE_GRAPHICS_BACKEND=wined3d
 export VK_DRIVER_FILES="$bundle/kosmickrisp_icd.json"
 # Inherited driver selection would override the bundled ICD.
-unset VK_ICD_FILENAMES VK_ADD_DRIVER_FILES VK_LOADER_DRIVERS_SELECT VK_LOADER_DRIVERS_DISABLE
+unset WINE_VULKAN_LIBRARY VK_ICD_FILENAMES VK_ADD_DRIVER_FILES VK_LOADER_DRIVERS_SELECT VK_LOADER_DRIVERS_DISABLE
 exec "$wine_bin/wine64" "$@"

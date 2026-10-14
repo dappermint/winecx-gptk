@@ -12,7 +12,7 @@ only environment variables change there, DXVK DLLs go next to the cloned
 executable, DXVK caches are redirected, and only the game process is
 stopped, never the bottle's wineserver.
 The driver writes MESA_KK_PRESENT_LOG and MESA_KK_COMPILE_LOG on one
-monotonic clock, so frame-time hitches can be attributed to compiles.
+monotonic clock, so frame-time hitches can be correlated with compiles; overlap is not proof of causation.
 """
 import argparse
 import csv
@@ -144,12 +144,41 @@ def summarize_compiles(events):
 
 
 def parse_dxvk_logs(directory):
-    result = {"logs": [], "gpl": None, "version": None, "rejections": [], "errors": 0}
+    result = {"logs": [], "gpl": None, "version": None, "rejections": [], "errors": 0,
+              "drivers": [], "binding_models": [], "enabled_extensions": [],
+              "effective_configuration": {}, "gpl_enabled": None, "backend_verified": False}
     for log in sorted(directory.glob("*.log")):
         if not re.search(r"_(d3d9|d3d8|d3d11|dxgi)\.log$", log.name):
             continue
         result["logs"].append(log.name)
+        in_extensions = False
+        in_configuration = False
         for line in log.read_text(errors="replace").splitlines():
+            driver = re.search(r"Driver\s*:\s*(.+)", line)
+            if driver and driver[1].strip() not in result["drivers"]:
+                result["drivers"].append(driver[1].strip())
+            binding = re.search(r"Binding model:\s*(.+)", line)
+            if binding and binding[1].strip() not in result["binding_models"]:
+                result["binding_models"].append(binding[1].strip())
+            if "Enabled extensions:" in line:
+                in_extensions = True
+                in_configuration = False
+            elif "Effective configuration:" in line:
+                in_configuration = True
+                in_extensions = False
+            elif in_extensions:
+                extension = re.match(r"info:\s+(VK_[A-Za-z0-9_]+)\s*$", line)
+                if extension:
+                    if extension[1] not in result["enabled_extensions"]:
+                        result["enabled_extensions"].append(extension[1])
+                else:
+                    in_extensions = False
+            elif in_configuration:
+                option = re.match(r"info:\s+([A-Za-z0-9_.]+)\s*=\s*(.*)", line)
+                if option:
+                    result["effective_configuration"][option[1]] = option[2].strip()
+                else:
+                    in_configuration = False
             version = re.search(r"DXVK: ((?:v|native-)\S+)", line)
             if version and not result["version"]:
                 result["version"] = version.group(1)
@@ -161,6 +190,11 @@ def parse_dxvk_logs(directory):
                 result["rejections"].append(line.strip())
             if line.startswith("err:"):
                 result["errors"] += 1
+    result["backend_verified"] = bool(result["drivers"]) and all(
+        "kosmickrisp" in driver.lower() for driver in result["drivers"])
+    if "VK_EXT_graphics_pipeline_library" in result["enabled_extensions"]:
+        configured = result["effective_configuration"].get("dxvk.enableGraphicsPipelineLibrary", "Auto")
+        result["gpl_enabled"] = configured.lower() != "false" and result["gpl"] is True
     return result
 
 
@@ -173,6 +207,8 @@ def analyze_run(run_dir, skip_seconds):
                   if present.is_file() else {"error": "no present log"},
         "compiles": summarize_compiles(events),
         "prewarm_events": sum(e["origin"] == "prewarm" for e in events),
+        "attribution": "temporal correlation, not proof of causation",
+        "gameplay_verified": False,
         "dxvk": parse_dxvk_logs(run_dir / "dxvk"),
     }
     meta = run_dir / "run.json"
@@ -234,9 +270,22 @@ def cmd_bundle(args):
     manifest = json.loads((runtime_lib / "kosmickrisp_icd.json").read_text())
     manifest["ICD"]["library_path"] = "./libvulkan_kosmickrisp.dylib"
     (out / "kosmickrisp_icd.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    revision = subprocess.run(["git", "-C", str(Path(args.source)), "describe", "--always",
-                               "--dirty"], capture_output=True, text=True).stdout.strip()
-    (out / "SOURCE.txt").write_text(f"build={build}\nrevision={revision}\n")
+    info = json.loads((build / "meson-info/meson-info.json").read_text())
+    source = Path(info["directories"]["source"]).resolve()
+    if args.source and Path(args.source).resolve() != source:
+        sys.exit("--source differs from the source recorded by Meson")
+    top = subprocess.run(["git", "-C", str(source), "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True).stdout.strip()
+    revision = "unknown (exported source)"
+    if top and Path(top).resolve() == source:
+        revision = subprocess.run(["git", "-C", str(source), "describe", "--always", "--dirty"],
+                                  capture_output=True, text=True, check=True).stdout.strip()
+    (out / "SOURCE.txt").write_text(f"build={build.resolve()}\nsource={source}\nsource_revision_observed={revision}\n")
+    provenance = {"source_directory": str(source), "source_revision_observed": revision,
+                  "limitation": "Source observed at packaging; not an attestation of when the driver was compiled.",
+                  "driver_sha256": file_digest(out / driver.name),
+                  "loader_sha256": file_digest(out / "libvulkan.1.dylib")}
+    (out / "SOURCE.json").write_text(json.dumps(provenance, indent=2) + "\n")
     print(f"bundle ready: {out}")
 
 
@@ -267,10 +316,9 @@ def prepare_prefix(args, env, prefix):
                        check=True, timeout=600, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL)
         subprocess.run([wine(args.runtime, "wineserver"), "-w"], env=env, timeout=300)
-    if not (prefix / ".winecx-kosmickrisp-dxvk.json").is_file():
-        helper = Path(args.runtime) / "Wine/share/kosmickrisp/dxvk-prefix.py"
-        subprocess.run([sys.executable, str(helper), "install", str(prefix),
-                        str(Path(args.runtime) / "DXVK3")], check=True)
+    helper = Path(args.runtime) / "Wine/share/kosmickrisp/dxvk-prefix.py"
+    subprocess.run([sys.executable, str(helper), "install", str(prefix),
+                    str(Path(args.runtime) / "DXVK3")], check=True)
 
 
 DXVK_NAMES = ("d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll")
@@ -442,6 +490,16 @@ def cmd_run(args):
     if args.game not in games:
         sys.exit(f"unknown game {args.game}; known: {', '.join(games)}")
     game = games[args.game]
+    scene = None
+    if args.scene:
+        scene_path = Path(args.scene).resolve()
+        scene = json.loads(scene_path.read_text())
+        if scene.get("game") != args.game or not scene.get("id") or not isinstance(scene.get("arguments"), list):
+            sys.exit("scene must specify this game, an id and fixed arguments")
+        if not all(isinstance(item, str) for item in scene["arguments"]):
+            sys.exit("scene arguments must be strings")
+        game = dict(game, arguments=scene["arguments"], skip_seconds=scene.get("skip_seconds", 0.0),
+                    scene={"specification": scene, "sha256": file_digest(scene_path)})
     work = Path(args.work).expanduser().resolve()
     bundle = Path(args.bundle).resolve()
     live = game.get("steam", False)
@@ -510,22 +568,31 @@ def run_labels(args, game, env, game_dir, prefix, live, via_steam, bundle,
         run_env = dict(env)
         run_env.update({
             "MESA_KK_PRESENT_LOG": str(run_dir / "present.csv"),
-            "MESA_KK_COMPILE_LOG": str(run_dir / "compile.csv"),
+            **({"MESA_KK_COMPILE_LOG": str(run_dir / "compile.csv")} if args.diagnostics else {}),
             "MESA_SHADER_CACHE_DIR": str(cache),
             "DXVK_STATE_CACHE_PATH": str(state_cache),
-            "DXVK_SHADER_CACHE_PATH": str(shader_cache),
-            "DXVK_LOG_PATH": str(run_dir / "dxvk"),
+            "DXVK_SHADER_CACHE_PATH": "Z:" + str(shader_cache),
+            "DXVK_LOG_PATH": "Z:" + str(run_dir / "dxvk"),
             "DXVK_LOG_LEVEL": "info",
         })
         if args.cache_log:
             run_env["MESA_KK_CACHE_LOG"] = str(run_dir / "cache.jsonl")
+        if not args.diagnostics:
+            for key in ("MESA_KK_COMPILE_LOG", "MESA_KK_CACHE_LOG", "MESA_KK_VARIANT_LOG", "MESA_KK_METAL_CONCURRENCY_LOG", "MESA_KK_VARIANT_STATS"):
+                run_env.pop(key, None)
         run_env.update(game.get("env", {}))
         for item in args.env:
             key, _, value = item.partition("=")
             run_env[key] = value
         meta = {"game": args.game, "label": label, "seconds": seconds, "live_bottle": live,
                 "bundle": (bundle / "SOURCE.txt").read_text() if (bundle / "SOURCE.txt").is_file() else None,
-                "arguments": game.get("arguments", []),
+                "arguments": game.get("arguments", []), "scene": game.get("scene"),
+                "measurement": "diagnostic" if args.diagnostics else "frame-times",
+                "driver_sha256": file_digest(bundle / "libvulkan_kosmickrisp.dylib"),
+                "loader_sha256": file_digest(bundle / "libvulkan.1.dylib"),
+                "game_sha256": file_digest(game_dir / game["executable"]),
+                "dxvk_sha256": {name: file_digest(Path(args.runtime) / "DXVK3" / game.get("dxvk_arch", "x32") / name)
+                                for name in game.get("dxvk_dlls", ["d3d9.dll"] if not live else [])},
                 "env": {k: run_env[k] for k in sorted(run_env)
                         if k.startswith(("MESA_", "DXVK_", "VK_", "CX_", "WINEDLL", "WINEMSYNC", "WINEESYNC"))}}
         (run_dir / "run.json").write_text(json.dumps(meta, indent=2) + "\n")
@@ -575,7 +642,7 @@ def main(argv=None):
     b = sub.add_parser("bundle")
     b.add_argument("--build-dir", required=True)
     b.add_argument("--runtime", required=True)
-    b.add_argument("--source", default=".")
+    b.add_argument("--source", help="must match Meson's recorded source; inferred when omitted")
     b.add_argument("--out", required=True)
     r = sub.add_parser("run")
     r.add_argument("--runtime", required=True)
@@ -587,6 +654,8 @@ def main(argv=None):
     r.add_argument("--runs", default="cold,warm")
     r.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
     r.add_argument("--cache-log", action="store_true")
+    r.add_argument("--scene", help="JSON with a scene id, game and fixed command arguments")
+    r.add_argument("--diagnostics", action=argparse.BooleanOptionalAction, default=True)
     r.add_argument("--via-steam", action="store_true")
     a = sub.add_parser("analyze")
     a.add_argument("runs", nargs="+")
