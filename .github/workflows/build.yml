@@ -55,8 +55,7 @@ env:
   # carrying it never publishes
   KOSMICKRISP_ENABLED: ${{ inputs.kosmickrisp == true }}
   # the wine1119 branch of our winecx import: crossover 26.3's diff merged
-  # onto wine 11.19 with every patch committed in-tree, so patches/ is empty
-  # on this branch and the apply loop is a no-op.
+  # onto wine 11.19. patches/ carries the remaining build compatibility fixes.
   WINECX_REPO: https://github.com/dappermint/winecx.git
   WINECX_COMMIT: b1417d2773a0dfc15cc78b78e1257ee965bcca89
   NIXPKGS_REV: ac62194c3917d5f474c1a844b6fd6da2db95077d
@@ -66,7 +65,8 @@ env:
   DXMT_REPO: niltonperimneto/dxmt
   DXMT_VERSION: "main-186a232"
   DXMT_COMMIT: 186a2327f1ec76376f6bc1ef64636f08b0728567
-  DXMT_RELEASE_TAG: v0.80-186a232
+  DXMT_RELEASE_TAG: v0.80-relay12.186a232
+  DXMT_ARTIFACT: dxmt-186a2327-builtin.tar.gz
   DXMT_ARTIFACT_SHA256: 2126e74a30c7d4d415d63509de955d33c8e6f30df418763ccd09a58320382623
   # the runtime stream this build publishes into. lived inline in the stamping
   # step as a default and went stale there: v4.2.0 shipped while the workflow
@@ -154,8 +154,9 @@ jobs:
       # save, against a make of 71s. a hosted runner is a fresh vm and does
       # need it.
       - name: restore compiler cache
+        id: compiler-cache
         if: inputs.runner == 'hosted'
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: ~/.ccache
           key: ccache-${{ env.WINECX_COMMIT }}-${{ github.run_id }}
@@ -194,8 +195,7 @@ jobs:
 
       - name: apply patches
         run: |
-          # committed in the winecx branch on this lane; the glob guard keeps
-          # an empty patches/ from failing the loop
+          # The glob guard also allows a lane with no out-of-tree patches.
           for p in "$PWD"/patches/*.patch; do
             [ -e "$p" ] || { echo "no out-of-tree patches"; break; }
             echo "applying $(basename "$p")"
@@ -441,7 +441,8 @@ jobs:
           ncpu=$(sysctl -n hw.logicalcpu)
           ccache -z >/dev/null
           set -o pipefail
-          make -j"$(( ncpu + ncpu / 2 ))" 2>&1 | tee /tmp/make.log
+          make -j"$(( ncpu + ncpu / 2 ))" dlls/winemac.drv/d3dmetal.o dlls/win32u/dce.o 2>&1 | tee /tmp/make.log
+          make -j"$(( ncpu + ncpu / 2 ))" 2>&1 | tee -a /tmp/make.log
 
           # pinning the deployment target stops the binaries claiming to be
           # newer, but not configure finding an API the SDK declares and the
@@ -541,8 +542,8 @@ jobs:
           # same 1.10.3 release is what pairs with it.
           fetch "https://github.com/doitsujin/dxvk/releases/download/v$DXVK_VERSION/dxvk-$DXVK_VERSION.tar.gz" \
                 dxvk-upstream.tar.gz 8d1a3c912761b450c879f98478ae64f6f6639e40ce6848170a0f6b8596fd53c6
-          fetch "https://github.com/$DXMT_REPO/releases/download/$DXMT_RELEASE_TAG/dxmt-186a2327-builtin.tar.gz" \
-                dxmt.tar.gz "$DXMT_ARTIFACT_SHA256" 
+          fetch "https://github.com/$DXMT_REPO/releases/download/$DXMT_RELEASE_TAG/$DXMT_ARTIFACT" \
+                dxmt.tar.gz "$DXMT_ARTIFACT_SHA256"
           tar -xzf dxvk.tar.gz -C payload
           tar -xzf dxvk-upstream.tar.gz -C payload
           tar -xzf dxmt.tar.gz -C payload
@@ -1345,6 +1346,13 @@ jobs:
           # 860s for 428MB at the default against 1139s for 434MB at 0. the
           # bottleneck is this runner's uplink at roughly 1MB/s, not its cpu,
           # and level 6 can only ever put fewer bytes on the wire.
+
+      - name: save compiler cache
+        if: always() && !cancelled() && inputs.runner == 'hosted' && steps.compiler-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.ccache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
 
   publish:
     name: publish the runtime release

@@ -1,0 +1,16 @@
+diff --git a/dlls/winemac.drv/d3dmetal.c b/dlls/winemac.drv/d3dmetal.c
+--- a/dlls/winemac.drv/d3dmetal.c
++++ b/dlls/winemac.drv/d3dmetal.c
+@@ -314,4 +314,4 @@
+-static LSTATUS WINAPI DECLSPEC_HOTPATCH RegCloseKey( HKEY hkey )
++static LSTATUS WINAPI DECLSPEC_HOTPATCH d3dmetal_reg_close_key( HKEY hkey )
+ {
+     if (!hkey) return ERROR_INVALID_HANDLE;
+     if (hkey >= (HKEY)0x80000000) return ERROR_SUCCESS;
+@@ -321,5 +321,5 @@
+ static LSTATUS WINAPI my_RegCloseKey(HKEY hkey)
+ {
+     TRACE("RegCloseKey %p\n", hkey);
+-    return RegCloseKey(hkey);
++    return d3dmetal_reg_close_key(hkey);
+ }
