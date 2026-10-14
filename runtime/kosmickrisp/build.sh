@@ -27,6 +27,17 @@ checkout() {
     git -C "$directory" checkout --detach FETCH_HEAD
     [ "$(git -C "$directory" rev-parse HEAD)" = "$revision" ]
 }
+if [ -z "$snapshot" ] && [ -n "${KOSMICKRISP_MESA_REPO:-}" ]; then
+    mesa_source="$work/mesa-$KOSMICKRISP_MESA_COMMIT"
+    checkout "$KOSMICKRISP_MESA_REPO" "$KOSMICKRISP_MESA_COMMIT" "$mesa_source"
+    snapshot="$work/mesa-snapshot-$KOSMICKRISP_MESA_COMMIT"
+    if [ ! -e "$snapshot" ]; then
+        python3 "$script_dir/source-snapshot.py" export \
+            --source "$mesa_source" --commit "$KOSMICKRISP_MESA_COMMIT" --out "$snapshot"
+    fi
+    python3 "$script_dir/source-snapshot.py" verify "$snapshot" > "$work/pinned-snapshot-verified.json"
+    [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"])' "$work/pinned-snapshot-verified.json")" = "$KOSMICKRISP_MESA_COMMIT" ]
+fi
 if [ -n "$snapshot" ]; then
     snapshot=$(cd -- "$snapshot" && pwd -P)
     python3 "$script_dir/source-snapshot.py" verify "$snapshot" > "$work/snapshot-verified.json"

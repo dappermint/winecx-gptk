@@ -17,7 +17,11 @@ dispatch `build.yml` with the `kosmickrisp` box ticked. the artifact is named
 `main` too; a push never builds this lane.
 
 `runtime/kosmickrisp/pins.env` pins the shadexternals cross-build recipe, the
-mesa commit its submodule must resolve to, and the khronos loader and headers.
+complete Mesa tree from `niltonperimneto/mesa`, and the Khronos loader and headers.
+The default build exports a verified snapshot of the pinned fork commit and
+replaces the recipe's older Mesa submodule. The fork already contains the carried
+driver fixes, so the old patches are not reapplied. Updating the fork requires an
+explicit pin update here; CI never follows a moving branch tip.
 `build.sh` builds them for x86_64, because an arm64 icd cannot load into this
 wine host. the build fails if a library is not x86_64-only, links anything
 outside `/usr/lib` and `/System`, or fails codesign verification. mesa's zlib
