@@ -16,6 +16,12 @@ dispatch `build.yml` with the `kosmickrisp` box ticked. the artifact is named
 `whiskywine-gptk-libraries-kosmickrisp-experimental`, and publish refuses it, on
 `main` too; a push never builds this lane.
 
+Hosted builds validate compilation, relocation, windows and media on macOS 26.
+They require `gpu_runner_label` to run the complete GPU suite as a second job
+on a physical Metal 4 GPU, using the exact uploaded runtime and its checksums.
+The dispatch must come from the repository owner. Self-hosted builds run the
+same GPU suite in the build job.
+
 `runtime/kosmickrisp/pins.env` pins the shadexternals cross-build recipe, the
 complete Mesa tree from `niltonperimneto/mesa`, and the Khronos loader and headers.
 The default build exports a verified snapshot of the pinned fork commit and
