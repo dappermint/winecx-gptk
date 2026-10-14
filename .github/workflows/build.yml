@@ -63,7 +63,11 @@ env:
   MOLTENVK_VERSION: "1.4.2"
   FAUDIO_VERSION: "26.10"
   DXVK_VERSION: "1.10.3"
-  DXMT_VERSION: "0.80"
+  DXMT_REPO: niltonperimneto/dxmt
+  DXMT_VERSION: "main-186a232"
+  DXMT_COMMIT: 186a2327f1ec76376f6bc1ef64636f08b0728567
+  DXMT_RELEASE_TAG: v0.80-186a232
+  DXMT_ARTIFACT_SHA256: 2126e74a30c7d4d415d63509de955d33c8e6f30df418763ccd09a58320382623
   # the runtime stream this build publishes into. lived inline in the stamping
   # step as a default and went stale there: v4.2.0 shipped while the workflow
   # still said 4.1.0, so every dispatch without an explicit input mislabelled
@@ -537,8 +541,8 @@ jobs:
           # same 1.10.3 release is what pairs with it.
           fetch "https://github.com/doitsujin/dxvk/releases/download/v$DXVK_VERSION/dxvk-$DXVK_VERSION.tar.gz" \
                 dxvk-upstream.tar.gz 8d1a3c912761b450c879f98478ae64f6f6639e40ce6848170a0f6b8596fd53c6
-          fetch "https://github.com/3Shain/dxmt/releases/download/v$DXMT_VERSION/dxmt-v$DXMT_VERSION-builtin.tar.gz" \
-                dxmt.tar.gz 8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d
+          fetch "https://github.com/$DXMT_REPO/releases/download/$DXMT_RELEASE_TAG/dxmt-186a2327-builtin.tar.gz" \
+                dxmt.tar.gz "$DXMT_ARTIFACT_SHA256" 
           tar -xzf dxvk.tar.gz -C payload
           tar -xzf dxvk-upstream.tar.gz -C payload
           tar -xzf dxmt.tar.gz -C payload
@@ -606,7 +610,8 @@ jobs:
           # visible to the webhelper: chromium probes for an nvidia gpu, loads
           # d3dmetal, and takes the helper down with it. the d3d frontends stay
           # per-bottle in Libraries/DXMT, deployed by whisky's backend picker.
-          dxmt=payload/v$DXMT_VERSION
+          dxmt="payload/$DXMT_COMMIT"
+          [ -d "$dxmt" ] || dxmt="payload/v$DXMT_VERSION" 
           cp -R "$dxmt/x86_64-unix/." Libraries/Wine/lib/wine/x86_64-unix/
           cp "$dxmt/x86_64-windows/winemetal.dll" Libraries/Wine/lib/wine/x86_64-windows/
           if [ -f "$dxmt/i386-windows/winemetal.dll" ]; then
@@ -1380,7 +1385,7 @@ jobs:
             echo "|---|---|"
             echo "| winecx | \`$WINECX_COMMIT\` |"
             echo "| dxvk | $DXVK_VERSION |"
-            echo "| dxmt | $DXMT_VERSION |"
+            echo "| dxmt | `$DXMT_COMMIT` ($DXMT_VERSION) |"
             echo "| moltenvk | $MOLTENVK_VERSION |"
             echo "| sha256 | \`$sha\` |"
             echo
