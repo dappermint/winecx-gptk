@@ -158,5 +158,6 @@ done >> "$output/SOURCE.txt"
 } > "$output/BUILD-TOOLS.txt"
 cp "$driver_build/externals/mesa/build-target/meson-info/intro-buildoptions.json" "$output/BUILD-OPTIONS.json"
 cp "$driver_build/externals/mesa/build-target/meson-info/intro-compilers.json" "$output/BUILD-COMPILERS.json"
+python3 "$script_dir/optional_entrypoints.py" "$driver_build/externals/mesa/build-target" "$output/OPTIONAL-ENTRYPOINTS.json"
 
-(cd "$output" && shasum -a 256 ./*.dylib kosmickrisp_icd.json SOURCE.txt BUILD-TOOLS.txt BUILD-OPTIONS.json BUILD-COMPILERS.json > SHA256SUMS)
+(cd "$output" && shasum -a 256 ./*.dylib kosmickrisp_icd.json SOURCE.txt BUILD-TOOLS.txt BUILD-OPTIONS.json BUILD-COMPILERS.json OPTIONAL-ENTRYPOINTS.json > SHA256SUMS)

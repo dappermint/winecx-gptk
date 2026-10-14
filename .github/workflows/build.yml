@@ -1008,8 +1008,18 @@ jobs:
           # which the summary line says.
           sdkpath=$(xcrun --sdk macosx --show-sdk-path)
           sdkver=$(xcrun --sdk macosx --show-sdk-version)
+          if [ "$KOSMICKRISP_ENABLED" = true ]; then
+            (cd Libraries/Wine/lib/kosmickrisp && shasum -a 256 -c SHA256SUMS)
+          fi
           python3 - "$sdkpath" "$sdkver" <<'PYEOF'
-          import os, re, subprocess, sys
+          import json, os, re, subprocess, sys
+          sys.path.insert(0, 'runtime/kosmickrisp')
+          from optional_entrypoints import is_optional_import
+
+          optional = {'schema': 1, 'symbols': []}
+          if os.environ.get('KOSMICKRISP_ENABLED') == 'true':
+              with open('Libraries/Wine/lib/kosmickrisp/OPTIONAL-ENTRYPOINTS.json') as stream:
+                  optional = json.load(stream)
 
           sdk = sys.argv[1]
           sdkver = sys.argv[2]
@@ -1075,6 +1085,8 @@ jobs:
                   if not m:
                       continue
                   sym = m.group(1)
+                  if is_optional_import(p, sym, line, optional):
+                      continue
                   if sym not in universe:
                       kind = 'weak, so the compiler knew' if ' weak ' in line else 'strong'
                       bad.setdefault(p, set()).add('%s (%s)' % (sym, kind))
