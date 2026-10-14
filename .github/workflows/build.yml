@@ -1249,11 +1249,41 @@ jobs:
         if: failure()
         run: |
           mkdir -p runtime-crash-reports
+          if [ -x Libraries/Wine/bin/wine64 ]; then
+            export WINEPREFIX="$PWD/debug-prefix"
+            export DYLD_FALLBACK_LIBRARY_PATH="$PWD/Libraries/Wine/lib"
+            export WINEDLLOVERRIDES="mscoree=d;mshtml=d"
+            python3 - <<'PY'
+          import subprocess
+          with open('runtime-crash-reports/lldb.txt', 'w') as stream:
+              try:
+                  subprocess.run(['xcrun', 'lldb', '--batch', '--arch', 'x86_64',
+                      '-o', 'settings set target.disable-aslr false',
+                      '-o', 'run', '-o', 'thread backtrace all',
+                      '-o', 'register read', '-o', 'image list',
+                      '--', './Libraries/Wine/bin/wine64', 'wineboot', '-u'],
+                      stdout=stream, stderr=subprocess.STDOUT, timeout=60)
+              except (OSError, subprocess.TimeoutExpired) as error:
+                  stream.write(str(error) + '\n')
+          PY
+            tar -czf runtime-debug.tar.gz \
+              --exclude='Libraries/Wine/share/wine/mono' \
+              --exclude='Libraries/Wine/share/wine/gecko' Libraries/Wine
+          fi
           reports="$HOME/Library/Logs/DiagnosticReports"
           if [ -d "$reports" ]; then
             find "$reports" -type f -iname '*wine*' -exec cp {} runtime-crash-reports/ \;
           fi
           sw_vers > runtime-crash-reports/host.txt
+
+      - name: upload failed runtime for debugging
+        if: failure() && steps.install.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: runtime-debug
+          path: runtime-debug.tar.gz
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: upload runtime smoke logs
         if: always()
