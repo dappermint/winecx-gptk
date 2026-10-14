@@ -1,0 +1,83 @@
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 557b3d76..7badbb09 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1752,32 +1752,35 @@ void server_init_process_done(void)
+         chdir( "/" );
+     close( initial_cwd );
+
+-    if ((exename = ntdll_wcsrchr( main_wargv[0], '\\' ))) exename++;
+-    else exename = main_wargv[0];
+-
+-    /* CROSSOVER HACK: bug 3853 */
++    if (main_wargv && main_wargv[0])
+     {
+-        static const WCHAR explorerexeW[] = {'e','x','p','l','o','r','e','r','.','e','x','e',0};
+-        const char *child_pipe = getenv("WINE_WAIT_CHILD_PIPE");
+-        const char *ignore_child = getenv("WINE_WAIT_CHILD_PIPE_IGNORE");
+-        if (child_pipe)
++        if ((exename = ntdll_wcsrchr( main_wargv[0], '\\' ))) exename++;
++        else exename = main_wargv[0];
++
++        /* CROSSOVER HACK: bug 3853 */
+         {
+-            if (!ntdll_wcsicmp( exename, explorerexeW ))
+-            {
+-                int fd = atoi(child_pipe);
+-                if (fd) close( fd );
+-                unsetenv("WINE_WAIT_CHILD_PIPE");
+-            }
+-            else if (ignore_child)
++            static const WCHAR explorerexeW[] = {'e','x','p','l','o','r','e','r','.','e','x','e',0};
++            const char *child_pipe = getenv("WINE_WAIT_CHILD_PIPE");
++            const char *ignore_child = getenv("WINE_WAIT_CHILD_PIPE_IGNORE");
++            if (child_pipe)
+             {
+-                WCHAR ignore[MAX_PATH];
+-                ntdll_umbstowcs( ignore_child, strlen(ignore_child) + 1, ignore, MAX_PATH );
+-                if (!ntdll_wcsicmp( exename, ignore ))
++                if (!ntdll_wcsicmp( exename, explorerexeW ))
+                 {
+                     int fd = atoi(child_pipe);
+                     if (fd) close( fd );
+                     unsetenv("WINE_WAIT_CHILD_PIPE");
+                 }
++                else if (ignore_child)
++                {
++                    WCHAR ignore[MAX_PATH];
++                    ntdll_umbstowcs( ignore_child, strlen(ignore_child) + 1, ignore, MAX_PATH );
++                    if (!ntdll_wcsicmp( exename, ignore ))
++                    {
++                        int fd = atoi(child_pipe);
++                        if (fd) close( fd );
++                        unsetenv("WINE_WAIT_CHILD_PIPE");
++                    }
++                }
+             }
+         }
+     }
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 7345bfe4..8121a05f 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -3440,8 +3440,7 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
+         return status;
+     }
+
+-    if (peb->OSMajorVersion > 5 && /* CW HACK 22939: ASLR is supported only on Windows Vista and later */
+-        !pe_mapping->image.map_addr &&
++    if (!pe_mapping->image.map_addr &&
+         (pe_mapping->image.image_charact & IMAGE_FILE_DLL) &&
+         (pe_mapping->image.image_flags & IMAGE_FLAGS_ImageDynamicallyRelocated))
+     {
+@@ -4091,7 +4090,10 @@ static BOOL force_laa(void)
+     BOOL result=FALSE;
+     WCHAR *app_name;
+
++    if (!main_wargv || !main_wargv[0])
++        return FALSE;
++
+     if ((app_name = ntdll_wcsrchr( main_wargv[0], '\\' ))) app_name++;
+     else app_name = main_wargv[0];
+
+     if ((e != NULL) && (*e != '\0' && *e != '0'))

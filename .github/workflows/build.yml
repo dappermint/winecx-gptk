@@ -566,7 +566,7 @@ jobs:
       - name: install and package
         id: install
         run: |
-          export PATH="$NIX_TOOL_PATH$PATH"
+          export PATH="$PWD/ccache-bin:$NIX_TOOL_PATH$PATH"
 
           # this step ran 1517s on run 31625185579 against a make of 71s, and
           # the obvious suspects all measured small on this machine: the
@@ -1194,7 +1194,7 @@ jobs:
           export WINEPREFIX="$PWD/smoke-prefix"
           export DYLD_FALLBACK_LIBRARY_PATH="$PWD/Libraries/Wine/lib"
           export WINEDLLOVERRIDES="mscoree=d;mshtml=d"
-          WINEDEBUG=-all ./Libraries/Wine/bin/wine64 wineboot -u >/dev/null 2>&1 || true
+          WINEDEBUG=+seh,+loaddll ./Libraries/Wine/bin/wine64 wineboot -u > wineboot.log 2>&1 || true
 
           WINEDEBUG=+winediag ./Libraries/Wine/bin/wine64 winmsg.exe > smoke.log 2>&1 || true
           grep -E '^\[|^RESULT|^FAIL' smoke.log | tee -a "$GITHUB_STEP_SUMMARY"
@@ -1244,6 +1244,29 @@ jobs:
             echo "::error::bundled libraries do not load; the runtime is broken for anyone without this nix store"
             exit 1
           }
+
+      - name: collect runtime crash reports
+        if: failure()
+        run: |
+          mkdir -p runtime-crash-reports
+          reports="$HOME/Library/Logs/DiagnosticReports"
+          if [ -d "$reports" ]; then
+            find "$reports" -type f -iname '*wine*' -exec cp {} runtime-crash-reports/ \;
+          fi
+          sw_vers > runtime-crash-reports/host.txt
+
+      - name: upload runtime smoke logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: runtime-smoke-logs
+          path: |
+            wineboot.log
+            smoke.log
+            mf.log
+            dlopen.log
+            runtime-crash-reports/
+          if-no-files-found: ignore
 
       - name: probe the experimental kosmickrisp driver
         if: env.KOSMICKRISP_ENABLED == 'true'
