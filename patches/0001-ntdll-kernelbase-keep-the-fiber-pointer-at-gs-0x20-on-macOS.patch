@@ -1,0 +1,214 @@
+From 0367ad9b6cf2c12958338a4563684850a42304af Mon Sep 17 00:00:00 2001
+From: Hetthicker <chhavik509@gmail.com>
+Date: Wed, 28 Oct 2026 15:50:42 +0530
+Subject: [PATCH] ntdll, kernelbase: keep the fiber pointer at gs:0x20 on
+ macOS.
+
+On macOS, PE code runs with gsbase on the pthread TSD, and only a few TEB
+fields are mirrored there. gs:0x20 is NT_TIB.FiberData on Windows, but in
+the TSD it is the thread's QoS slot (0x8ff by default). Applications that
+inline GetCurrentFiber() as __readgsqword(0x20) read 0x8ff and pass it to
+SwitchToFiber(), which crashes (seen with TEKKEN 8 and DOOM; reproduced by
+tests/fibprobe.c).
+
+On threads that have become fibers (TEB->HasFiberData), park the macOS QoS
+value in amd64_thread_data (TEB+0x348) and expose the fiber pointer at
+gs:0x20 while PE code runs:
+
+- kernelbase: ConvertThreadToFiberEx, SwitchToFiber and ConvertFiberToThread
+  write the fiber pointer to gs:0x20 when gsbase is not the TEB.
+- ntdll: the syscall and unix call dispatchers restore the QoS value when
+  entering unix code and re-expose the fiber pointer on the way back to PE;
+  call_user_mode_callback does the same on entry to PE; init_handler gives
+  macOS its value back when a signal interrupts PE code.
+
+Threads that never become fibers are unaffected.
+---
+ dlls/kernelbase/thread.c        | 33 +++++++++++++++++--
+ dlls/ntdll/unix/signal_x86_64.c | 56 ++++++++++++++++++++++++++++++++-
+ 2 files changed, 85 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/kernelbase/thread.c b/dlls/kernelbase/thread.c
+index 58f8621..8b2f4cf 100644
+--- a/dlls/kernelbase/thread.c
++++ b/dlls/kernelbase/thread.c
+@@ -1119,6 +1119,33 @@ LPVOID WINAPI DECLSPEC_HOTPATCH CreateFiberEx( SIZE_T stack_commit, SIZE_T stack
+ }
+ 
+ 
++static inline void set_current_fiber( void *fiber )
++{
++#ifdef __x86_64__
++    /* Applications read GetCurrentFiber() straight off gs:0x20. On macOS PE code
++     * usually runs with gsbase on the pthread TSD rather than the TEB, and that
++     * slot is the macOS QoS value. Park the QoS value where ntdll's syscall and
++     * unix call dispatchers put it back on the way into unix code (see
++     * amd64_thread_data::pthread_qos), then expose the fiber pointer. */
++    void **pthread_qos = (void **)((char *)NtCurrentTeb() + 0x348);
++    void *gs0, *slot;
++
++    __asm__ __volatile__( "movq %%gs:0x0,%0" : "=r" (gs0) );
++    if (gs0 != NtCurrentTeb()->Tib.ExceptionList)  /* gsbase is not the TEB */
++    {
++        if (!*pthread_qos)
++        {
++            __asm__ __volatile__( "movq %%gs:0x20,%0" : "=r" (slot) );
++            if (fiber) *pthread_qos = slot;
++        }
++        if (fiber || *pthread_qos)
++            __asm__ __volatile__( "movq %0,%%gs:0x20" :: "r" (fiber) : "memory" );
++    }
++#endif
++    NtCurrentTeb()->Tib.FiberData = fiber;
++}
++
++
+ /***********************************************************************
+  *           ConvertFiberToThread   (kernelbase.@)
+  */
+@@ -1132,7 +1159,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH ConvertFiberToThread(void)
+         return FALSE;
+     }
+     relocate_thread_actctx_stack( &NtCurrentTeb()->ActivationContextStack );
+-    NtCurrentTeb()->Tib.FiberData = NULL;
++    set_current_fiber( NULL );
+     NtCurrentTeb()->HasFiberData = FALSE;
+     HeapFree( GetProcessHeap(), 0, fiber );
+     return TRUE;
+@@ -1194,7 +1221,7 @@ LPVOID WINAPI DECLSPEC_HOTPATCH ConvertThreadToFiberEx( LPVOID param, DWORD flag
+     fiber->flags            = flags;
+     fiber->fls_slots        = NtCurrentTeb()->FlsSlots;
+     relocate_thread_actctx_stack( &fiber->actctx.stack_space );
+-    NtCurrentTeb()->Tib.FiberData = fiber;
++    set_current_fiber( fiber );
+     NtCurrentTeb()->HasFiberData = TRUE;
+     return fiber;
+ }
+@@ -1245,7 +1272,7 @@ void WINAPI DECLSPEC_HOTPATCH SwitchToFiber( LPVOID fiber )
+     /* stack_allocation and stack_base never change */
+ 
+     /* FIXME: should save floating point context if requested in fiber->flags */
+-    NtCurrentTeb()->Tib.FiberData     = new_fiber;
++    set_current_fiber( new_fiber );
+     NtCurrentTeb()->Tib.ExceptionList = new_fiber->except;
+     NtCurrentTeb()->Tib.StackBase     = new_fiber->stack_base;
+     NtCurrentTeb()->Tib.StackLimit    = new_fiber->stack_limit;
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 12f2fc7..cbc3488 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -521,6 +521,7 @@ struct amd64_thread_data
+     DWORD                 fs;            /* 0338 WOW TEB selector */
+     DWORD                 mxcsr;         /* 033c Unix-side mxcsr register */
+     char                  syscall_dispatch; /* 0340 */
++    void                 *pthread_qos;   /* 0348 macOS: unix-side value of the TSD slot under gs:0x20 */
+ };
+ 
+ C_ASSERT( sizeof(struct amd64_thread_data) <= sizeof(((struct teb_data *)0)->cpu_data) );
+@@ -530,6 +531,7 @@ C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct amd64_thread_data, ins
+ C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct amd64_thread_data, fs ) == 0x338 );
+ C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct amd64_thread_data, mxcsr ) == 0x33c );
+ C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct amd64_thread_data, syscall_dispatch ) == 0x340 );
++C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct amd64_thread_data, pthread_qos ) == 0x348 );
+ 
+ static inline struct amd64_thread_data *amd64_thread_data( struct thread_data *data )
+ {
+@@ -799,6 +801,16 @@ static inline struct thread_data *init_handler( void *sigcontext )
+ #elif defined __APPLE__
+     _thread_set_tsd_base( (uint64_t)amd64_data->pthread_teb );
+ 
++    /* PE code runs with gsbase on the pthread TSD, where gs:0x20 is both the
++     * Windows fiber pointer and the macOS QoS slot. If we interrupted PE code,
++     * the slot holds the fiber pointer; give macOS its value back before any
++     * libsystem code in the handler reads it. TEB->Tib.FiberData stays the
++     * authoritative copy of the PE value (kernelbase writes both). */
++    if (amd64_data->pthread_qos &&
++        !is_inside_signal_stack( data, (void *)RSP_sig((ucontext_t *)sigcontext) ) &&
++        !is_inside_syscall( data, RSP_sig((ucontext_t *)sigcontext) ))
++        ((void **)amd64_data->pthread_teb)[4] = amd64_data->pthread_qos;
++
+     /* When in a syscall, CS will be the kernel's selector (0x07, SYSCALL_CS in xnu source)
+      * instead of the user selector (cs64_sel: 0x2b, USER64_CS).
+      * Fix up sigcontext so later code can compare it to cs64_sel.
+@@ -1706,6 +1718,15 @@ __ASM_GLOBAL_FUNC( call_user_mode_callback,
+                    "jz 1f\n\t"
+                    "movw %ax,%fs\n"
+                    "1:\n\t"
++#elif defined __APPLE__
++                   /* entering PE on a fiber thread: stash the macOS QoS slot, expose the fiber pointer at gs:0x20 */
++                   "testb $0x4,0x17ee(%r13)\n\t" /* NtCurrentTeb()->HasFiberData */
++                   "jz 1f\n\t"
++                   "movq %gs:0x20,%rax\n\t"
++                   "movq %rax,0x348(%r13)\n\t" /* amd64_thread_data()->pthread_qos */
++                   "movq 0x20(%r13),%rax\n\t"  /* NtCurrentTeb()->Tib.FiberData */
++                   "movq %rax,%gs:0x20\n"
++                   "1:\n\t"
+ #endif
+                    "movq 0x330(%r13),%r10\n\t" /* amd64_thread_data()->instrumentation_callback */
+                    "movq (%r10),%r10\n\t"
+@@ -3337,7 +3358,13 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
+                    "xorl %esi,%esi\n\t"
+                    "movl $0x3000003,%eax\n\t"      /* _thread_set_tsd_base */
+                    "syscall\n\t"
+-                   "leaq -0x98(%rbp),%rcx\n"
++                   /* entering unix: if gs:0x20 holds a fiber pointer, give the macOS QoS slot back its value */
++                   "movq 0x348(%r13),%rsi\n\t"     /* amd64_thread_data()->pthread_qos */
++                   "testq %rsi,%rsi\n\t"
++                   "jz 9f\n\t"
++                   "movq %rsi,%gs:0x20\n\t"
++                   "movq $0,0x348(%r13)\n"
++                   "9:\tleaq -0x98(%rbp),%rcx\n"
+ #endif
+                    "ldmxcsr 0x33c(%r13)\n\t"       /* amd64_thread_data()->mxcsr */
+                    "movl 0xb0(%rcx),%eax\n\t"      /* frame->syscall_id */
+@@ -3377,6 +3404,16 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
+                    /* push rbp-based kernel stack cfi */
+                    __ASM_CFI(".cfi_remember_state\n\t")
+                    __ASM_CFI_CFA_IS_AT2(rcx, 0xa8, 0x01) /* frame->syscall_cfa */
++#ifdef __APPLE__
++                   /* leaving unix on a fiber thread: stash the macOS QoS slot, expose the fiber pointer at gs:0x20 */
++                   "testb $0x4,0x17ee(%r13)\n\t"   /* NtCurrentTeb()->HasFiberData */
++                   "jz 8f\n\t"
++                   "movq %gs:0x20,%rdx\n\t"
++                   "movq %rdx,0x348(%r13)\n\t"     /* amd64_thread_data()->pthread_qos */
++                   "movq 0x20(%r13),%rdx\n\t"      /* NtCurrentTeb()->Tib.FiberData */
++                   "movq %rdx,%gs:0x20\n"
++                   "8:\n\t"
++#endif
+                    "leaq 0x70(%rcx),%rsp\n\t"      /* %rsp > frame means no longer inside syscall */
+ #if defined(__linux__) || defined(__FreeBSD__)
+                    "movb $1,0x340(%r13)\n\t"       /* amd64_thread_data()->syscall_dispatch */
+@@ -3659,6 +3696,13 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
+                    "xorl %esi,%esi\n\t"
+                    "movl $0x3000003,%eax\n\t"      /* _thread_set_tsd_base */
+                    "syscall\n\t"
++                   /* entering unix: if gs:0x20 holds a fiber pointer, give the macOS QoS slot back its value */
++                   "movq 0x348(%r13),%rsi\n\t"     /* amd64_thread_data()->pthread_qos */
++                   "testq %rsi,%rsi\n\t"
++                   "jz 9f\n\t"
++                   "movq %rsi,%gs:0x20\n\t"
++                   "movq $0,0x348(%r13)\n"
++                   "9:\n\t"
+ #endif
+                    "ldmxcsr 0x33c(%r13)\n\t"       /* amd64_thread_data()->mxcsr */
+                    "movq %r8,%rdi\n\t"             /* args */
+@@ -3677,6 +3721,16 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
+                    "movdqa 0x250(%rcx),%xmm15\n\t"
+                    "testl $0xffff,0xb4(%rcx)\n\t"  /* frame->restore_flags */
+                    "jnz " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") "\n\t"
++#ifdef __APPLE__
++                   /* leaving unix on a fiber thread: stash the macOS QoS slot, expose the fiber pointer at gs:0x20 */
++                   "testb $0x4,0x17ee(%r13)\n\t"   /* NtCurrentTeb()->HasFiberData */
++                   "jz 8f\n\t"
++                   "movq %gs:0x20,%rdx\n\t"
++                   "movq %rdx,0x348(%r13)\n\t"     /* amd64_thread_data()->pthread_qos */
++                   "movq 0x20(%r13),%rdx\n\t"      /* NtCurrentTeb()->Tib.FiberData */
++                   "movq %rdx,%gs:0x20\n"
++                   "8:\n\t"
++#endif
+                    /* switch to user stack */
+                    "movq 0x88(%rcx),%rsp\n\t"
+                    __ASM_CFI(".cfi_restore_state\n\t")
+-- 
+2.50.1 (Apple Git-155)
+
