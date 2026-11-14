@@ -341,6 +341,40 @@ jobs:
           rm -rf nls && mkdir nls && ln -s ../../winecx/nls/locale.nls nls/locale.nls
           test -r nls/locale.nls || { echo "::error::tools nls dir does not resolve"; exit 1; }
 
+      # winebus dlopens SDL2 by soname to claim game controllers. without it
+      # IOHID hands every pad to an SDL bus that is not there and no
+      # controller works (issue #10). nixpkgs' SDL2 is sdl2-compat, which loads
+      # SDL3 at run time from a path the closure walk cannot see, so build the
+      # real SDL2 from a pinned release, x86_64 at the floor, the way the
+      # stock engine ships it
+      - name: sdl2 for the controller bus
+        env:
+          SDL2_VERSION: "2.32.10"
+          SDL2_SHA256: "5f5993c530f084535c65a6879e9b26ad441169b3e25d789d83287040a9ca5165"
+        run: |
+          set -euo pipefail
+          command -v cmake >/dev/null || { echo "::error::cmake not on PATH"; exit 1; }
+          src="$RUNNER_TEMP/SDL2-$SDL2_VERSION.tar.gz"
+          curl -fsSL -o "$src" \
+            "https://github.com/libsdl-org/SDL/releases/download/release-$SDL2_VERSION/SDL2-$SDL2_VERSION.tar.gz"
+          echo "$SDL2_SHA256  $src" | shasum -a 256 -c -
+          rm -rf "$RUNNER_TEMP/SDL2-$SDL2_VERSION" "$RUNNER_TEMP/sdl2-build" "$RUNNER_TEMP/sdl2-x86_64"
+          tar -xzf "$src" -C "$RUNNER_TEMP"
+          prefix="$RUNNER_TEMP/sdl2-x86_64"
+          cmake -S "$RUNNER_TEMP/SDL2-$SDL2_VERSION" -B "$RUNNER_TEMP/sdl2-build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET" \
+            -DCMAKE_INSTALL_PREFIX="$prefix" \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF
+          cmake --build "$RUNNER_TEMP/sdl2-build" --parallel
+          cmake --install "$RUNNER_TEMP/sdl2-build"
+          [ -f "$prefix/lib/libSDL2-2.0.0.dylib" ] || {
+            echo "::error::the SDL2 build produced no libSDL2-2.0.0.dylib"; exit 1; }
+          [ -f "$prefix/include/SDL2/SDL.h" ] || { echo "::error::no SDL2 headers"; exit 1; }
+          echo "sdl2: $SDL2_VERSION $(lipo -archs "$prefix/lib/libSDL2-2.0.0.dylib")"
+          echo "SDL2_PREFIX=$prefix" >> "$GITHUB_ENV"
+
       - name: configure
         env:
           OPT_LEVEL: ${{ inputs.opt }}
@@ -388,6 +422,10 @@ jobs:
           # wine dlopens MoltenVK by soname; the bundled copy is found via
           # the loader fallback path whisky already sets for its runtime
           export ac_cv_lib_soname_MoltenVK="libMoltenVK.dylib"
+          # winebus dlopens SDL2 by soname as well; the headers come from the
+          # sdl2 step, and the bare name keeps the probe off its build path
+          export SDL2_CFLAGS="-I$SDL2_PREFIX/include/SDL2"
+          export ac_cv_lib_soname_SDL2="libSDL2-2.0.0.dylib"
           mkdir build && cd build
           ../winecx/configure \
             --host=x86_64-apple-darwin24 \
@@ -424,6 +462,15 @@ jobs:
             exit 1
           }
           echo "gstreamer: found"
+
+          # and SDL: without it winebus builds its SDL bus as a stub and every
+          # game controller is dropped, with nothing but a warn: in the log
+          grep -q '^#define SONAME_LIBSDL2 ' include/config.h || {
+            echo "::error::SDL2 was not found; winebus would ship without its SDL bus"
+            grep -i 'sdl' config.log | tail -20
+            exit 1
+          }
+          echo "sdl2: found"
 
       - name: make
         id: make
@@ -727,6 +774,12 @@ jobs:
           chmod u+w "$LIBDIR/libMoltenVK.dylib"
           echo "moltenvk: $MOLTENVK_VERSION $(lipo -archs "$LIBDIR/libMoltenVK.dylib")"
 
+          # SDL2 is dlopened by soname too, and comes from the sdl2 step rather
+          # than nix. its only dependencies are system frameworks; fixup()
+          # gives it a @loader_path id and a signature like the rest
+          cp "$SDL2_PREFIX/lib/libSDL2-2.0.0.dylib" "$LIBDIR/libSDL2-2.0.0.dylib"
+          chmod u+w "$LIBDIR/libSDL2-2.0.0.dylib"
+
           queue=""
           for d in $(cat store-outs.txt); do
             for so in libfreetype.6.dylib libgnutls.30.dylib; do
@@ -797,6 +850,7 @@ jobs:
 
           # the reference runtime ships both names; match it
           ln -sf libfreetype.6.dylib "$LIBDIR/libfreetype.dylib"
+          ln -sf libSDL2-2.0.0.dylib "$LIBDIR/libSDL2.dylib"
 
           # the unix modules dlopen libgnutls/libfreetype/libMoltenVK by bare
           # soname. dlopen searches the caller's rpaths, and lib/wine/<arch>-unix
@@ -1158,6 +1212,18 @@ jobs:
             exit 1
           }
           echo "media: ok, $plugins gstreamer plugins"
+
+          # and controllers: winebus has to carry the SDL bus, and the library
+          # it dlopens has to be in the tree, or no pad reaches a game
+          if grep -q 'SDL support not compiled in' Libraries/Wine/lib/wine/x86_64-unix/winebus.so; then
+            echo "::error::winebus.so has no SDL bus; no controller would work"
+            exit 1
+          fi
+          [ -f Libraries/Wine/lib/libSDL2-2.0.0.dylib ] || {
+            echo "::error::libSDL2-2.0.0.dylib is not bundled; the SDL bus could not load it"
+            exit 1
+          }
+          echo "controllers: ok"
 
       - name: verify the runtime can open a window
         run: |
